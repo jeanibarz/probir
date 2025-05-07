@@ -18,21 +18,18 @@ Your project root directory should typically contain:
 
 ## Features
 
-* **Proxy-based Interception:** Captures HTTP/HTTPS traffic from applications configured to use the proxy via environment variables (`HTTP_PROXY`, `HTTPS_PROXY`).
-* **Selective Logging:** Logs only requests/responses to/from a predefined list of target domains (e.g., `google.com`, `api.openai.com`, configurable in `probir.py`).
+* **Proxy-based Interception:** Captures HTTP traffic from applications configured to use the proxy via the `HTTP_PROXY` environment variable.
+* **Selective Logging:** Logs only requests/responses to/from a predefined list of target domains (configurable via the `TARGET_DOMAINS` environment variable).
 * **Full Data Capture:** Saves complete request and response details, including methods, URLs, headers, and full content bodies.
-* **Database Storage:** Stores captured traffic in an SQLite database (default path `/mnt/wsl_data/filtered_traffic_log.db`, as configured in `probir.py`).
-* **Standard Proxy Configuration:** Relies on standard HTTP/HTTPS proxy environment variables.
-* **Simplified HTTPS Handling:** Relies on client-side settings to bypass SSL certificate verification, removing the need for system-wide CA certificate installation.
+* **Database Storage:** Stores captured traffic in an SQLite database (path configured via the `DATABASE_FILE` environment variable).
 
 ## How it Works
 
-1.  **Environment Variable Configuration:** Applications are configured by setting the `HTTP_PROXY` and `HTTPS_PROXY` environment variables to point to the address and port where `mitmproxy` is listening (e.g., `http://localhost:8080`).
-2.  **`mitmproxy` Interception:** `mitmproxy` runs in regular proxy mode, listening on the configured port (default 8080). Applications send their traffic directly to `mitmproxy`.
-3.  **Custom Python Addon:** The `mitmproxy` Python addon script (`probir.py` from the project root) is copied to `/opt/mitmproxy_scripts/probir.py` by the `start_proxy.sh` script (when `start_proxy.sh` is run from the project root). This addon inspects each flow:
-    * It checks if the request's destination host matches (ends with) any of the `TARGET_DOMAINS` defined within `probir.py`.
-    * If it's a target domain, the script logs the request and corresponding response details (headers, content) to the SQLite database.
-4.  **HTTPS Handling:** `mitmproxy` generates certificates on-the-fly for HTTPS traffic. Since this setup does **not** involve installing the mitmproxy CA certificate system-wide, applications will encounter SSL certificate errors when accessing HTTPS sites through the proxy if those sites are targeted for interception. To allow interception of target domains over HTTPS, you **must** configure your client application to ignore SSL certificate errors (e.g., by setting `NODE_TLS_REJECT_UNAUTHORIZED=0` for Node.js applications, using `curl -k`, or similar settings in other tools).
+1.  **Environment Variable Configuration:** Applications are configured by setting the `HTTP_PROXY` environment variable to point to the address and port where `mitmproxy` is listening (e.g., `http://localhost:8080`).
+2.  **`mitmproxy` Interception:** `mitmproxy` runs in regular proxy mode, listening on the configured port (default 8080). Applications send their HTTP traffic directly to `mitmproxy`.
+3.  **Custom Python Addon:** The `mitmproxy` Python addon script (`probir.py`) inspects each flow:
+    * It checks if the request's destination host matches (ends with) any of the domains listed in the `TARGET_DOMAINS` environment variable.
+    * If it's a target domain, the script logs the request and corresponding response details to the SQLite database specified by `DATABASE_FILE`.
 
 ## Prerequisites
 
@@ -125,48 +122,36 @@ The `probir.py` script (located in the project root) contains the logging logic.
 
 ### 6\. Launching Applications with Proxy Configuration
 
-To make applications use the proxy, you must set `HTTP_PROXY` and `HTTPS_PROXY` environment variables in the terminal session where you launch the application. For HTTPS interception of target domains to work without client-side certificate errors (given no system-wide CA trust), additional settings like `NODE_TLS_REJECT_UNAUTHORIZED=0` are needed for Node.js applications.
+To make applications use the proxy, load the `.env` file in the terminal session where you launch the application.
 
 1.  **Open a new terminal** (while the proxy from Step 5 is running).
-2.  **Set the environment variables:**
+2.  **Load the `.env` file:**
     ```bash
-    export HTTP_PROXY="http://localhost:8080"
-    export HTTPS_PROXY="http://localhost:8080"
+    source .env
     ```
-3.  **For Node.js applications (like VS Code, many CLI tools), also set:**
-    ```bash
-    export NODE_TLS_REJECT_UNAUTHORIZED=0
-    ```
-    This step is crucial for allowing these applications to communicate with targeted HTTPS domains through the proxy by bypassing SSL certificate checks.
-4.  **Launch your application from the same terminal:**
+3.  **Launch your application from the same terminal:**
     For example, to launch VS Code opening the current directory:
     ```bash
     code .
     ```
-    To launch `curl` (though for `curl` you might also use the `-k` flag directly):
+    To launch `curl`:
     ```bash
-    curl -v [https://api.openai.com](https://api.openai.com) # If api.openai.com is a target, this will show cert error unless -k is used
-    curl -k -v [https://api.openai.com](https://api.openai.com) # This will work for targeted HTTPS domains
+    curl -v https://example.com
     ```
 
-**Note:** Remember to set these environment variables in every new terminal session from which you intend to launch applications through the proxy.
+**Note:** Remember to load the `.env` file in every new terminal session from which you intend to launch applications through the proxy.
 
 ### 7\. Testing the Proxy
 
 1.  Ensure `mitmproxy` (via `start_proxy.sh`) is running.
-2.  Launch your application from a terminal where proxy environment variables are correctly set (see Step 6).
-3.  Perform a network action targeting a domain in `TARGET_DOMAINS` in `probir.py`.
-4.  Check the `mitmproxy` terminal for logs from `probir.py` and verify data in the database.
+2.  Launch your application from a terminal where the `.env` file is loaded (see Step 6).
+3.  Perform a network action targeting a domain listed in `TARGET_DOMAINS`.
+4.  Check the `mitmproxy` terminal for logs and verify data in the database.
 
-Test with `curl` (from a terminal with proxy variables set as described in Step 6). For HTTPS sites **targeted** by `probir.py`:
-
+Test with `curl` (from a terminal with `.env` loaded):
 ```bash
-# Terminal already has HTTP_PROXY and HTTPS_PROXY set
-# For HTTPS to a TARGET_DOMAIN, use -k to ignore certificate errors
-curl -k -v [https://your.target.domain.com](https://your.target.domain.com)
+curl -v https://example.com
 ```
-
-Output should show proxy use and SSL details. Omitting `-k` for a targeted HTTPS domain will cause a certificate error.
 
 ### 8\. Stopping the Proxy
 
