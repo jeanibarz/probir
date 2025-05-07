@@ -93,16 +93,28 @@ The `probir.py` script (located in the project root) contains the logging logic.
 
 ### 5\. Running the Proxy
 
-1.  **Make `start_proxy.sh` executable (first time only):**
-    (Ensure `start_proxy.sh` is in your project root directory)
+1.  **Configure Environment Variables:**
+    Copy `.env.example` to `.env` and fill in the appropriate values:
+    ```bash
+    cp .env.example .env
+    ```
+    Edit `.env` to suit your needs, setting `DATABASE_FILE` and `TARGET_DOMAINS` as required.
 
+2.  **Load the Environment Variables:**
+    Before running the proxy, load the `.env` file:
+    ```bash
+    set -a; source .env; set +a
+    ```
+    This ensures that the environment variables are available to the script.
+
+3.  **Make `start_proxy.sh` executable (first time only):**
+    (Ensure `start_proxy.sh` is in your project root directory)
     ```bash
     chmod +x ./start_proxy.sh
     ```
 
-2.  **Start the proxy script:**
+4.  **Start the proxy script:**
     Run the `start_proxy.sh` script **from the project root directory**. It copies `probir.py` (from the root) to `/opt/mitmproxy_scripts/probir.py` and then starts `mitmdump` as `mitmproxyuser`.
-
     ```bash
     bash ./start_proxy.sh
     ```
@@ -195,7 +207,24 @@ Note: The `timestamp` column defaults to the time the record is inserted into th
 
 ### 10\. Environment Variables (`.env` and `.env.example`)
 
-The project includes `.env.example`. You can copy it to `.env`. Currently, `probir.py` hardcodes its configuration (like `TARGET_DOMAINS`, `DATABASE_FILE`). These files are available for your own extensions or if you modify scripts to consume them.
+The project includes `.env.example`, which you should copy to `.env` for local configuration. The `.env` file allows you to customize settings without modifying the codebase.
+
+1. **Copy `.env.example` to `.env`:**
+   ```bash
+   cp .env.example .env
+   ```
+
+2. **Edit `.env` to suit your needs:**
+   - `DATABASE_FILE`: Path to the SQLite database file (e.g., `/mnt/wsl_data/filtered_traffic_log.db`).
+   - `TARGET_DOMAINS`: Comma-separated list of domains to log (e.g., `google.com,example.com,generativelanguage.googleapis.com`).
+
+These variables control the behavior of `probir.py`. After modifying `.env`, ensure that your environment is updated by sourcing it:
+   ```bash
+   source .env
+   ```
+   or by running your application from the same terminal session.
+
+**Note:** `probir.py` reads these environment variables. Make sure to set them before running the proxy.
 
 ## Troubleshooting
 
