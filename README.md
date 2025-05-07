@@ -75,10 +75,7 @@ sudo adduser mitmproxyuser
 
 The `probir.py` script (located in the project root) contains the logging logic.
 
-1.  **Review Addon Configuration:**
-    Open `probir.py` in the project root. You can modify `TARGET_DOMAINS` and `DATABASE_FILE` directly in this script if needed, before starting the proxy.
-
-2.  **Create Directory for Operational Addon Script:**
+1.  **Create Directory for Operational Addon Script:**
     This directory will store the copy of `probir.py` that `mitmdump` uses. The `start_proxy.sh` script (run from the project root) will copy `probir.py` from the root into this directory.
 
     ```bash
