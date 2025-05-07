@@ -212,11 +212,8 @@ These variables control the behavior of `probir.py`. After modifying `.env`, ens
 
   * **No Traffic Reaching Proxy:**
       * Verify `mitmproxy` (via `start_proxy.sh`) is running and listening (`sudo ss -tulnp | grep 8080`).
-      * Check `HTTP_PROXY`/`HTTPS_PROXY` (`env | grep _PROXY`) in the application's terminal.
-      * Ensure the application was launched from the terminal where these variables were set.
-  * **Certificate Errors for HTTPS (Expected for Target Domains):**
-      * SSL/TLS errors are **expected** for targeted HTTPS domains due to mitmproxy's dynamic certificates not being system-trusted.
-      * **Solution:** Client-side bypass: Set `NODE_TLS_REJECT_UNAUTHORIZED=0` for Node.js apps, use `curl -k`, or equivalent for other clients, as described in Step 6.
+      * Check `HTTP_PROXY` (`env | grep _PROXY`) in the application's terminal.
+      * Ensure the application was launched from the terminal where this variable was set.
   * **Database Issues (`unable to open database file`, etc.):**
       * Ensure `mitmproxyuser` has write permissions to the directory of `DATABASE_FILE` (e.g., `/mnt/wsl_data/`).
       * Check group ownership (`ls -ld /mnt/wsl_data/`) and `mitmproxyuser` group membership (`groups mitmproxyuser`). Adjust with `sudo usermod -aG <groupname> mitmproxyuser` if needed. Restart proxy or re-login for group changes.
