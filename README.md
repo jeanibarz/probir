@@ -215,8 +215,8 @@ The project includes `.env.example`, which you should copy to `.env` for local c
    ```
 
 2. **Edit `.env` to suit your needs:**
-   - `DATABASE_FILE`: Path to the SQLite database file (e.g., `/mnt/wsl_data/filtered_traffic_log.db`).
-   - `TARGET_DOMAINS`: Comma-separated list of domains to log (e.g., `google.com,example.com,generativelanguage.googleapis.com`).
+   - `DATABASE_FILE`: Path to the SQLite database file (e.g., `/path/to/your/database.db`).
+   - `TARGET_DOMAINS`: Comma-separated list of domains to log (e.g., `example.com,yourtargetdomain.com`).
 
 These variables control the behavior of `probir.py`. After modifying `.env`, ensure that your environment is updated by sourcing it:
    ```bash
