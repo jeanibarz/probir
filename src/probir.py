@@ -1,19 +1,13 @@
 import sqlite3
 import json
 import logging
+import os
 from mitmproxy import http, ctx # type: ignore
 
 # --- Configuration ---
-DATABASE_FILE = "/mnt/wsl_data/filtered_traffic_log.db"
-# Define the domains you want to log.
-# The script will log traffic if the request host *ends with* any of these domains.
-# For example, "google.com" will match "www.google.com", "api.google.com", etc.
-TARGET_DOMAINS = [
-    "google.com",
-    "example.com", # Add other domains you want to target
-    "generativelanguage.googleapis.com"
-    # "api.youraimodel.com", # Example for an AI model API
-]
+DATABASE_FILE = os.environ.get('DATABASE_FILE', '/mnt/wsl_data/filtered_traffic_log.db')
+TARGET_DOMAINS = os.environ.get('TARGET_DOMAINS', 'google.com,example.com,generativelanguage.googleapis.com').split(',')
+TARGET_DOMAINS = [domain.strip() for domain in TARGET_DOMAINS]
 # --- End Configuration ---
 
 # Set up basic logging for the script itself

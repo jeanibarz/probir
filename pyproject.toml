@@ -1,0 +1,24 @@
+[project]
+name = "probir"
+version = "0.1.0"
+description = "Scripts for processing LLM interaction traces."
+    dependencies = [
+        "datasets",
+        "huggingface-hub",
+        "ollama",
+        "pydantic",
+        "PyYAML",
+        "pytest"
+    ]
+
+    [build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = [
+  "src"
+]

@@ -1,1 +1,9 @@
 .env
+logs/
+__pycache__/
+*.egg-info/
+build/
+filtered_traffic_log.db
+*.log
+data/
+memory-bank/

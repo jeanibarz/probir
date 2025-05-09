@@ -1,0 +1,57 @@
+# pipeline.yaml
+
+# Global settings for the pipeline
+pipeline_name: "SFT Dataset Processing Pipeline"
+default_base_input: "data/sft_dataset.jsonl" # Initial input for the first step
+
+# List of processing steps
+steps:
+  - name: "1. Session Identification"
+    script: "src/step2b_identify_sessions.py"
+    enabled: true
+    inputs:
+      main: "{base}"
+    outputs:
+      main: "data/sft_dataset_S1_sessionized.jsonl" # S1 for Step 1 in new order
+    args: []
+    description: "Adds session_id and turn_in_session_id to traces."
+
+  - name: "2. Regex-based Anonymization"
+    script: "src/step1_anonymize_data.py"
+    enabled: true
+    inputs:
+      main: "{prev_output}"
+    outputs:
+      main: "data/sft_dataset_S2_anonymized_regex.jsonl"
+    args: []
+    description: "Applies regex-based anonymization."
+
+  - name: "3. LLM-based Anonymization"
+    script: "src/step1b_anonymize_llm.py"
+    enabled: true
+    inputs:
+      main: "{prev_output}"
+    outputs:
+      main: "data/sft_dataset_S3_anonymized_llm.jsonl"
+    args: ["--chunk_size", "10000", "--chunk_overlap", "1000", "--max_workers", "10", "--ollama_model", "myaniu/qwen2.5-1m:7b", "--ollama_host", "http://10.0.2.2:11434"]
+    description: "Applies LLM-based PII detection and anonymization."
+
+  - name: "4. Heuristic Complexity Scoring"
+    script: "src/step2_score_complexity.py"
+    enabled: true
+    inputs:
+      main: "{prev_output}"
+    outputs:
+      main: "data/sft_dataset_S4_complexity_scored.jsonl"
+    args: []
+    description: "Calculates heuristic complexity scores for traces."
+
+  - name: "5. Feedback/Correction Pattern Analysis"
+    script: "src/step3_analyze_correction_patterns.py"
+    enabled: true # Assuming this is the next step to be fully implemented
+    inputs:
+      main: "{prev_output}"
+    outputs:
+      main: "data/sft_dataset_S5_correction_analyzed.jsonl"
+    args: ["--ollama_model", "myaniu/qwen2.5-1m:7b", "--ollama_host", "http://10.0.2.2:11434"] # Added model and host
+    description: "Analyzes traces for feedback and correction patterns using an LLM."
