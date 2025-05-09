@@ -1,228 +1,177 @@
-# PROxy-Based Interaction Recorder (PROBIR)
+# PROxy-Based Interaction Recorder & Dataset Curator (PROBIR)
 
-An intercepting proxy to capture network interactions via applications (like VS Code or others configured to use a proxy) and generate a dataset from pairs of requests/responses.
+PROBIR is a comprehensive suite of tools designed to capture network interactions via a proxy and then process this raw data through a configurable pipeline to generate curated datasets suitable for various downstream tasks, including training SFT models.
 
-This project implements a 'man-in-the-middle' for specified domains, routing traffic through a proxy-based interaction recorder to automatically log full request and response data to an SQLite database. The gathered interactions can then be filtered for relevance and quality.
+Initially focused on intercepting traffic with `mitmproxy`, the project has expanded to include a multi-step data processing pipeline for anonymization, session identification, complexity scoring, pattern analysis, and dataset formatting for platforms like Hugging Face.
 
-The core of this project uses `mitmproxy` with a custom Python script (`probir.py`) for selective logging. Applications are configured to use this proxy via standard HTTP/HTTPS proxy environment variables.
+## Core Components
+
+1.  **Traffic Interception (Proxy):**
+    *   Uses `mitmproxy` with a custom Python script (`src/probir.py`) to selectively log HTTP/S requests and responses from configured applications to an SQLite database.
+2.  **Data Curation Pipeline:**
+    *   A series of Python scripts (primarily in `src/`) orchestrated by `src/run_pipeline.py` to transform the raw captured data into a structured and refined dataset.
+    *   Supports checkpointing and resumption.
+
+## Key Features
+
+### Proxy Features
+*   **Selective Interception:** Captures HTTP/S traffic from applications configured to use the proxy, targeting specific domains.
+*   **Full Data Capture:** Saves complete request/response details (headers, bodies) to an SQLite database.
+*   **Configurable:** Target domains and database paths are set via environment variables.
+
+### Data Curation Pipeline Features
+*   **Modular Pipeline:** Process data through a series of configurable steps defined in `pipeline.yaml`.
+*   **Data Extraction:** Extracts relevant traces from the raw proxy logs.
+*   **Session Identification:** Groups related interactions into sessions.
+*   **Anonymization:** Includes regex-based and LLM-based PII removal.
+*   **Complexity Scoring:** Assigns scores to data samples based on defined metrics.
+*   **Correction Pattern Analysis:** Identifies patterns in user corrections or feedback.
+*   **Dataset Generation:** Prepares datasets in formats like JSONL, suitable for Hugging Face.
+*   **Hugging Face Hub Integration:** Scripts to push datasets directly to the Hugging Face Hub.
+*   **Checkpointing & Resumption:** The pipeline can be resumed from the last successful step.
+*   **Data Validation & Reporting:** Includes mechanisms for validating data at each step and generating execution reports.
+*   **Shared Utilities:** A common utility module (`src/common_utils.py`) for logging, argument parsing, data I/O, etc.
+*   **Testing:** Basic test suite using `pytest` for core utilities.
 
 ## Project Structure
 
-Your project root directory should typically contain:
-* `probir.py` (The mitmproxy addon script)
-* `start_proxy.sh` (Script to prepare and start the proxy)
-* `README.md` (This file)
-* `UNLICENSE`
-* `.gitignore`
-* `.env.example` (and optionally `.env` for local environment variables)
+The project follows a `src/` layout:
 
-## Features
+*   `src/`
+    *   `probir.py`: The core mitmproxy addon script for traffic interception.
+    *   `run_pipeline.py`: Orchestrator for the data curation pipeline.
+    *   `step*.py` (e.g., `step1_anonymize_data.py`): Individual processing scripts for the pipeline.
+    *   `common_utils.py`: Shared utilities for all Python scripts.
+    *   Other utility scripts (e.g., `push_hf_dataset.py`, `inspect_db.py`).
+*   `tests/`: Contains `pytest` tests.
+*   `pipeline.yaml`: Configuration file defining the stages of the data curation pipeline.
+*   `pyproject.toml`: Defines project dependencies and packaging information.
+*   `.env.example`: Template for environment variables (copy to `.env`).
+*   `start_proxy.sh`: Script to start the mitmproxy interceptor.
+*   `README.md`: This file.
+*   `UNLICENSE`: Project license.
+*   `logs/`: Directory for log files (gitignored).
+*   `data/`: Directory for datasets (gitignored).
+*   `memory-bank/`: Cline's internal memory files (gitignored).
 
-* **Proxy-based Interception:** Captures HTTP traffic from applications configured to use the proxy via the `HTTP_PROXY` environment variable.
-* **Selective Logging:** Logs only requests/responses to/from a predefined list of target domains (configurable via the `TARGET_DOMAINS` environment variable).
-* **Full Data Capture:** Saves complete request and response details, including methods, URLs, headers, and full content bodies.
-* **Database Storage:** Stores captured traffic in an SQLite database (path configured via the `DATABASE_FILE` environment variable).
+## Setup and Installation
 
-## How it Works
+### Prerequisites
+*   Python 3.8+
+*   `mitmproxy` (can be installed via pip or system package manager)
+*   `uv` (recommended for fast environment setup) or `pip`
 
-1.  **Environment Variable Configuration:** Applications are configured by setting the `HTTP_PROXY` environment variable to point to the address and port where `mitmproxy` is listening (e.g., `http://localhost:8080`).
-2.  **`mitmproxy` Interception:** `mitmproxy` runs in regular proxy mode, listening on the configured port (default 8080). Applications send their HTTP traffic directly to `mitmproxy`.
-3.  **Custom Python Addon:** The `mitmproxy` Python addon script (`probir.py`) inspects each flow:
-    * It checks if the request's destination host matches (ends with) any of the domains listed in the `TARGET_DOMAINS` environment variable.
-    * If it's a target domain, the script logs the request and corresponding response details to the SQLite database specified by `DATABASE_FILE`.
+### Installation Steps
 
-## Prerequisites
-
-* **Operating System:** Debian or a Debian-based distribution (e.g., Ubuntu).
-* **Python:** Python 3.6+ and `pip`.
-* **`mitmproxy`:** The `mitmproxy` tool.
-* **`curl`:** For testing.
-* **`sudo` access:** Required for installing packages, managing users/groups, and running scripts that modify system state or run processes as other users.
-
-## Setup Instructions
-
-### 1. Clone the Repository
-
-```bash
-git clone https://github.com/jeanibarz/probir.git
-cd probir
-```
-
-### 2\. Install Prerequisites
-
-```bash
-sudo apt update
-sudo apt install -y python3 python3-pip curl mitmproxy
-# Note: On Debian-based systems, installing mitmproxy via apt is often recommended.
-```
-
-### 3\. Create a Dedicated User for `mitmproxy`
-
-This user (`mitmproxyuser`) will run the `mitmproxy` (mitmdump) process. Ensure this user has write permissions to the directory where the database will be stored (e.g., `/mnt/wsl_data/`).
-
-```bash
-sudo adduser mitmproxyuser
-# Follow the prompts. You can skip optional info.
-
-# Grant mitmproxyuser write permissions to the database directory.
-# Example: If /mnt/wsl_data/ is owned by group 'vboxsf' (common in VirtualBox/WSL):
-# sudo usermod -aG vboxsf mitmproxyuser
-# Replace 'vboxsf' with the actual group owning '/mnt/wsl_data/' (check with 'ls -ld /mnt/wsl_data/').
-# Ensure the group has write permissions, or adjust ownership/permissions of the target database directory.
-```
-
-### 4\. Prepare `mitmproxy` Addon Environment
-
-The `probir.py` script (located in the project root) contains the logging logic.
-
-1.  **Create Directory for Operational Addon Script:**
-    This directory will store the copy of `probir.py` that `mitmdump` uses. The `start_proxy.sh` script (run from the project root) will copy `probir.py` from the root into this directory.
-
+1.  **Clone the Repository:**
     ```bash
-    sudo mkdir -p /opt/mitmproxy_scripts
-    # Set ownership to mitmproxyuser so it can operate within this dir if mitmproxy needs to write other files.
-    sudo chown mitmproxyuser:mitmproxyuser /opt/mitmproxy_scripts
-    sudo chmod 750 /opt/mitmproxy_scripts # rwx for user, rx for group
+    git clone https://github.com/jeanibarz/probir.git
+    cd probir
     ```
 
-### 5\. Running the Proxy
+2.  **Create and Activate a Virtual Environment (Recommended):**
+    ```bash
+    python -m venv .venv
+    source .venv/bin/activate
+    ```
 
-1.  **Configure Environment Variables:**
-    Copy `.env.example` to `.env` and fill in the appropriate values:
+3.  **Install Dependencies:**
+    Using `uv` (recommended):
+    ```bash
+    uv pip install -e .
+    ```
+    Or using `pip`:
+    ```bash
+    pip install -e .
+    ```
+    This installs the `probir` package in editable mode along with all its dependencies defined in `pyproject.toml`.
+
+4.  **Configure Environment Variables:**
+    Copy `.env.example` to `.env` and customize it:
     ```bash
     cp .env.example .env
+    nano .env
     ```
-    Edit `.env` to suit your needs, setting `DATABASE_FILE` and `TARGET_DOMAINS` as required.
+    Key variables for the proxy:
+    *   `DATABASE_FILE`: Path to the SQLite database for raw traffic.
+    *   `TARGET_DOMAINS`: Comma-separated domains to intercept.
+    Key variables for the pipeline (if using LLM-based steps):
+    *   `OLLAMA_HOST`: URL for the Ollama server.
+    *   Other API keys or model names as required by specific pipeline steps.
 
-2.  **Load the Environment Variables:**
-    Before running the proxy, load the `.env` file:
+5.  **(For Proxy) Mitmproxy User Setup (If running proxy as a different user):**
+    The original README contained detailed steps for setting up a `mitmproxyuser`. If you intend to run `mitmproxy` under a dedicated unprivileged user, refer to `mitmproxy` documentation and ensure that user has permissions to write to `DATABASE_FILE` and the directory specified in `start_proxy.sh` for script copying (`/opt/mitmproxy_scripts/`). The `start_proxy.sh` script handles running `mitmdump` as `mitmproxyuser`.
+
+## Usage
+
+### 1. Running the Traffic Interception Proxy
+
+1.  **Load Environment Variables:**
+    Ensure your `.env` file is configured. In your terminal:
     ```bash
     set -a; source .env; set +a
     ```
-    This ensures that the environment variables are available to the script.
-
-3.  **Make `start_proxy.sh` executable (first time only):**
-    (Ensure `start_proxy.sh` is in your project root directory)
+2.  **Make `start_proxy.sh` executable (first time):**
     ```bash
     chmod +x ./start_proxy.sh
     ```
-
-4.  **Start the proxy script:**
-    Run the `start_proxy.sh` script **from the project root directory**. It copies `probir.py` (from the root) to `/opt/mitmproxy_scripts/probir.py` and then starts `mitmdump` as `mitmproxyuser`.
+3.  **Start the Proxy:**
     ```bash
     bash ./start_proxy.sh
     ```
+    The proxy will listen on `http://localhost:8080` by default.
 
-    Keep this terminal open. `mitmdump` will run with options `--showhost` (to display the host in `mitmdump`'s output) and `-q` (quiet, reducing `mitmdump`'s own status messages). Logging from `probir.py` will still appear. The proxy listens on `http://localhost:8080`.
-
-    *(Note: Your `start_proxy.sh` script contains commented-out lines related to `iptables` setup. This guide focuses on the explicit proxy configuration method, which is the current active behavior of the script.)*
-
-### 6\. Launching Applications with Proxy Configuration
-
-To make applications use the proxy, load the `.env` file in the terminal session where you launch the application.
-
-1.  **Open a new terminal** (while the proxy from Step 5 is running).
-2.  **Load the `.env` file:**
+4.  **Configure Applications to Use the Proxy:**
+    In a new terminal (where you'll launch the application), load the `.env` file again (as it sets `HTTP_PROXY` and `HTTPS_PROXY`):
     ```bash
-    source .env
+    set -a; source .env; set +a
     ```
-3.  **Launch your application from the same terminal:**
-    For example, to launch VS Code opening the current directory:
+    Then launch your application (e.g., `code .`, `curl https://example.com`). Traffic to `TARGET_DOMAINS` will be logged.
+
+### 2. Running the Data Curation Pipeline
+
+The pipeline is orchestrated by `src/run_pipeline.py`.
+
+1.  **Configure `pipeline.yaml`:**
+    Define the sequence of steps, their parameters, and input/output files in `pipeline.yaml`.
+
+2.  **Ensure Input Data:**
+    Make sure the initial input file for the pipeline (often the output of an extraction step from `filtered_traffic_log.db`, or the database itself) exists.
+
+3.  **Run the Pipeline:**
+    From the project root, with your virtual environment activated:
     ```bash
-    code .
+    python src/run_pipeline.py --config pipeline.yaml
     ```
-    To launch `curl`:
+    Common options:
+    *   `--config <path_to_yaml>`: Specify the pipeline configuration file.
+    *   `--resume`: Resume from the last checkpoint if available.
+    *   `--force-rerun`: Ignore any existing checkpoint and run all steps.
+    *   `--log-level DEBUG/INFO/WARNING/ERROR`: Set the logging level.
+
+    The pipeline will process data according to `pipeline.yaml`, creating intermediate and final output files in the `data/` directory (or as specified in the config). Checkpoint information is stored in `logs/pipeline_checkpoint.json`. A summary report is generated in `logs/pipeline_execution_report.md`.
+
+### 3. Other Scripts
+
+*   **`src/inspect_db.py`:** Utility to inspect the schema and contents of the SQLite database.
     ```bash
-    curl -v https://example.com
+    python src/inspect_db.py --db-path path/to/your/filtered_traffic_log.db
     ```
+*   **`src/push_hf_dataset.py`:** Pushes a local dataset file to the Hugging Face Hub.
+    ```bash
+    python src/push_hf_dataset.py --file-path data/your_dataset.jsonl --repo-id your_username/your_dataset_name --private
+    ```
+    Requires `huggingface-cli login` beforehand.
 
-**Note:** Remember to load the `.env` file in every new terminal session from which you intend to launch applications through the proxy.
+## Configuration
 
-### 7\. Testing the Proxy
+*   **`.env` file:** For environment-specific settings like API keys, database paths, target domains for the proxy, and Ollama host.
+*   **`pipeline.yaml`:** Defines the stages, scripts, parameters, and input/output flow for the data curation pipeline.
+*   **`pyproject.toml`:** Manages Python dependencies and project metadata.
 
-1.  Ensure `mitmproxy` (via `start_proxy.sh`) is running.
-2.  Launch your application from a terminal where the `.env` file is loaded (see Step 6).
-3.  Perform a network action targeting a domain listed in `TARGET_DOMAINS`.
-4.  Check the `mitmproxy` terminal for logs and verify data in the database.
+## Contributing
 
-Test with `curl` (from a terminal with `.env` loaded):
-```bash
-curl -v https://example.com
-```
-
-### 8\. Stopping the Proxy
-
-In the terminal running `bash ./start_proxy.sh`, press `Ctrl+C`.
-
-### 9\. Database
-
-Captured traffic is stored in an SQLite database (default: `filtered_traffic_log.db` at `/mnt/wsl_data/`, path from `DATABASE_FILE` in `probir.py`). The schema defined in your `probir.py` is:
-
-  * `id`: INTEGER PRIMARY KEY AUTOINCREMENT
-  * `timestamp`: DATETIME DEFAULT CURRENT\_TIMESTAMP (Time of record insertion)
-  * `request_method`: TEXT
-  * `request_url`: TEXT (Full URL as `pretty_url` from mitmproxy)
-  * `request_host`: TEXT
-  * `request_http_version`: TEXT
-  * `request_headers`: TEXT (JSON encoded)
-  * `request_content`: BLOB
-  * `response_status_code`: INTEGER
-  * `response_reason`: TEXT
-  * `response_http_version`: TEXT
-  * `response_headers`: TEXT (JSON encoded)
-  * `response_content`: BLOB
-  * `client_ip`: TEXT
-  * `server_ip`: TEXT
-  * `duration`: REAL (Request-response cycle time in seconds)
-
-Inspect with `sqlite3`:
-
-```bash
-sqlite3 /mnt/wsl_data/filtered_traffic_log.db
-sqlite> .headers on
-sqlite> .schema http_traffic
-sqlite> SELECT id, timestamp, request_host, request_url FROM http_traffic ORDER BY id DESC LIMIT 5;
-sqlite> .quit
-```
-
-Note: The `timestamp` column defaults to the time the record is inserted into the database. `request_url` does not have a `UNIQUE` constraint, so multiple entries for the same URL are possible.
-
-### 10\. Environment Variables (`.env` and `.env.example`)
-
-The project includes `.env.example`, which you should copy to `.env` for local configuration. The `.env` file allows you to customize settings without modifying the codebase.
-
-1. **Copy `.env.example` to `.env`:**
-   ```bash
-   cp .env.example .env
-   ```
-
-2. **Edit `.env` to suit your needs:**
-   - `DATABASE_FILE`: Path to the SQLite database file (e.g., `/path/to/your/database.db`).
-   - `TARGET_DOMAINS`: Comma-separated list of domains to log (e.g., `example.com,yourtargetdomain.com`).
-
-These variables control the behavior of `probir.py`. After modifying `.env`, ensure that your environment is updated by sourcing it:
-   ```bash
-   source .env
-   ```
-   or by running your application from the same terminal session.
-
-**Note:** `probir.py` reads these environment variables. Make sure to set them before running the proxy.
-
-## Troubleshooting
-
-  * **No Traffic Reaching Proxy:**
-      * Verify `mitmproxy` (via `start_proxy.sh`) is running and listening (`sudo ss -tulnp | grep 8080`).
-      * Check `HTTP_PROXY` (`env | grep _PROXY`) in the application's terminal.
-      * Ensure the application was launched from the terminal where this variable was set.
-  * **Database Issues (`unable to open database file`, etc.):**
-      * Ensure `mitmproxyuser` has write permissions to the directory of `DATABASE_FILE` (e.g., `/mnt/wsl_data/`).
-      * Check group ownership (`ls -ld /mnt/wsl_data/`) and `mitmproxyuser` group membership (`groups mitmproxyuser`). Adjust with `sudo usermod -aG <groupname> mitmproxyuser` if needed. Restart proxy or re-login for group changes.
-  * **Script Errors in `probir.py`:**
-      * Check the terminal output from `bash ./start_proxy.sh`. `mitmdump` runs with `-q` (quiet), but Python logging from `probir.py` should still be visible via mitmproxy's logging mechanisms. Errors in `probir.py` should appear there.
-  * **Quick Test:**
-      * To quickly verify the proxy is capturing traffic, you can use a command like `curl -v http://example.com` from a terminal where `HTTP_PROXY` is set. If the proxy is working, you should see the request logged in the `mitmproxy` terminal and the response captured in the database.
-
-This setup provides a flexible way to capture specific network interactions for analysis and dataset creation, with a simplified approach to HTTPS handling.
+Contributions are welcome! Please feel free to submit issues or pull requests.
 
 ## License
 
