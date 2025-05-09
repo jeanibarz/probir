@@ -26,6 +26,12 @@ REGEX_PATTERNS = [
     ("JWT", r'\b(ey[A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+\.[A-Za-z0-9-_.+/=]+)\b', "[JWT_REDACTED]"),
     # This pattern for URL credentials replaces the user:pass@ part.
     ("URL_CREDENTIALS", r'https?://(?:[^:]+:[^@]+@)', "[URL_CREDENTIALS_REDACTED_PREFIX]"),
+    # Basic pattern for 16-digit credit card numbers (e.g., XXXX-XXXX-XXXX-XXXX or XXXXXXXXXXXXXXXX)
+    ("CREDIT_CARD", r'\b(?:\d{4}[- ]?){3}\d{4}\b', "[CREDIT_CARD_REDACTED]"),
+    # Basic pattern for phone numbers (North American style, very generic)
+    ("PHONE_NUMBER", r'\b(?:\+?1[-. ]?)?\(?\d{3}\)?[-. ]?\d{3}[-. ]?\d{4}\b', "[PHONE_NUMBER_REDACTED]"),
+    # Basic IP Address v4
+    ("IP_ADDRESS_V4", r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', "[IP_ADDRESS_REDACTED]"),
 ]
 
 def anonymize_text(text_to_anonymize: str, patterns_found_in_current_text: set):
@@ -60,39 +66,52 @@ def anonymize_example(example: dict):
     # that might be reused, though dataset.map usually handles this.
     processed_example = copy.deepcopy(example)
     
+    # Ensure original_ fields are initialized to None so they are always present in the output schema
+    processed_example["original_messages"] = None
+    processed_example["original_completion"] = None
+    
     patterns_found_in_example = set()
-    original_messages_saved = False
-    original_completion_saved = False
+    # original_messages_saved and original_completion_saved are still useful to avoid overwriting
+    # original_messages/completion if multiple PII instances are found in the same field.
+    # However, the primary goal is to ensure the keys exist.
+    # Let's simplify: if any change is made, we store the original.
+    # The deepcopy of `example` at the start means `processed_example` initially has the originals.
+    # We only need to populate `original_messages` and `original_completion` if a change occurs.
 
     # Anonymize messages
     if "messages" in processed_example and isinstance(processed_example["messages"], list):
-        current_messages = processed_example["messages"]
+        # Store original messages if any part of them gets anonymized
+        # We need to compare the full list of messages before and after anonymization
+        original_messages_for_comparison = copy.deepcopy(processed_example["messages"])
+        
         anonymized_messages_list = []
-        for message_idx, message_dict in enumerate(current_messages):
+        made_change_to_messages = False
+        for message_dict in original_messages_for_comparison: # Iterate over a copy
             if isinstance(message_dict, dict) and "content" in message_dict:
                 original_content = message_dict["content"]
                 anonymized_content = anonymize_text(original_content, patterns_found_in_example)
-                if anonymized_content != original_content and not original_messages_saved:
-                    processed_example["original_messages"] = copy.deepcopy(current_messages)
-                    original_messages_saved = True
-                # Update the content in a copy of the message dict
-                # This is tricky if processed_example["messages"] is what we are iterating on
-                # Best to build a new list of messages for processed_example
-                msg_copy = copy.deepcopy(message_dict)
+                
+                msg_copy = copy.deepcopy(message_dict) # Work on a copy of the message
                 msg_copy["content"] = anonymized_content
                 anonymized_messages_list.append(msg_copy)
+                
+                if anonymized_content != original_content:
+                    made_change_to_messages = True
             else:
-                anonymized_messages_list.append(copy.deepcopy(message_dict)) # Keep non-conforming messages as is
-        processed_example["messages"] = anonymized_messages_list
+                anonymized_messages_list.append(copy.deepcopy(message_dict))
+        
+        if made_change_to_messages:
+            processed_example["original_messages"] = original_messages_for_comparison
+        processed_example["messages"] = anonymized_messages_list # Update with potentially anonymized messages
     
     # Anonymize completion
     if "completion" in processed_example and isinstance(processed_example["completion"], str):
-        original_completion_text = processed_example["completion"]
+        original_completion_text = processed_example["completion"] # This is the original from the input example
         anonymized_completion_text = anonymize_text(original_completion_text, patterns_found_in_example)
-        if anonymized_completion_text != original_completion_text and not original_completion_saved:
-            processed_example["original_completion"] = original_completion_text
-            original_completion_saved = True
-        processed_example["completion"] = anonymized_completion_text
+        
+        if anonymized_completion_text != original_completion_text:
+            processed_example["original_completion"] = original_completion_text # Store the original
+        processed_example["completion"] = anonymized_completion_text # Update with potentially anonymized completion
 
     # Store anonymization details
     # Ensure this field is always present, even if empty

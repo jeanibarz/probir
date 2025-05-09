@@ -6,4 +6,4 @@ build/
 filtered_traffic_log.db
 *.log
 data/
-memory-bank/
+.coverage

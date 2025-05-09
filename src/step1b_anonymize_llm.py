@@ -87,16 +87,16 @@ Do not provide any explanation, preamble, or commentary outside of the JSON obje
 # Removing local chunk_text function as it's imported from common_utils.py
 
 def _analyze_chunk_ollama(
-    chunk_text_with_offset: Tuple[str, int], 
+    chunk_text: str, # Changed: was chunk_text_with_offset: Tuple[str, int]
     client: ollama.Client, 
     ollama_model: str, # Added ollama_model parameter
     pii_schema_str: str # This is SYSTEM_PROMPT_TEMPLATE
 ) -> List[dict]:
     """
     Sends a single text chunk to Ollama for PII analysis.
-    Adjusts PII item coordinates relative to the original text.
+    PII item coordinates from LLM will be relative to the chunk.
     """
-    chunk_text, _ = chunk_text_with_offset # start_offset is not used by LLM directly
+    # chunk_text, _ = chunk_text_with_offset # Original line, offset not used
 
     if not chunk_text.strip():
         return []
@@ -136,10 +136,10 @@ def get_llm_pii_analysis(
     text_to_analyze: str, 
     client: ollama.Client,
     ollama_model: str, # Added
-    chunk_size: int, # Removed default, will come from args
-    chunk_overlap: int, # Removed default
-    max_workers: int, # Removed default
-    pii_schema_str: str = SYSTEM_PROMPT_TEMPLATE # Keep default for system prompt
+    chunk_size: int, 
+    chunk_overlap: int, 
+    max_workers: int, 
+    pii_schema_str: str = SYSTEM_PROMPT_TEMPLATE 
 ) -> List[dict]:
     """
     Sends text to Ollama model for PII analysis, handling chunking and parallel processing.
@@ -148,8 +148,9 @@ def get_llm_pii_analysis(
     if not isinstance(text_to_analyze, str) or not text_to_analyze.strip():
         return []
 
-    text_chunks_with_offsets = chunk_text(text_to_analyze, chunk_size, chunk_overlap)
-    if not text_chunks_with_offsets:
+    # chunk_text from common_utils returns List[str]
+    text_chunks = chunk_text(text_to_analyze, chunk_size, chunk_overlap)
+    if not text_chunks:
         return []
 
     all_pii_items_raw = []
@@ -158,25 +159,26 @@ def get_llm_pii_analysis(
     effective_max_workers = max(1, max_workers) # max_workers will be an int from args
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=effective_max_workers) as executor:
-        future_to_chunk = {
+        future_to_chunk_text = { # Store chunk_text for error logging if needed
             executor.submit(
                 _analyze_chunk_ollama, 
-                chunk_with_offset, 
+                text_chunk_item, # Pass the string directly
                 client, 
-                ollama_model, # Pass ollama_model
+                ollama_model, 
                 pii_schema_str
-            ): chunk_with_offset 
-            for chunk_with_offset in text_chunks_with_offsets
+            ): text_chunk_item
+            for text_chunk_item in text_chunks # Iterate over list of strings
         }
-        for future in concurrent.futures.as_completed(future_to_chunk):
+        for future in concurrent.futures.as_completed(future_to_chunk_text):
+            original_chunk_text = future_to_chunk_text[future]
             try:
                 pii_items_from_chunk = future.result()
                 if pii_items_from_chunk:
                     all_pii_items_raw.extend(pii_items_from_chunk)
             except Exception as exc:
-                chunk_info = future_to_chunk[future]
-                logger.error(f"Chunk (offset {chunk_info[1]}, len {len(chunk_info[0])}) generated an exception: {exc}", exc_info=True)
-
+                # Log with part of the chunk text for context
+                logger.error(f"Chunk starting with '{original_chunk_text[:50]}...' generated an exception: {exc}", exc_info=True)
+                
     # Deduplicate PII items based on (value, category)
     # This is important as overlapping chunks might detect the same PII
     unique_pii_items_map = {}
@@ -256,7 +258,9 @@ def process_example_with_llm(
         # --- End Injection ---
 
         anonymized_messages_list_for_output = []
-        original_messages_saved = "original_messages" in processed_example # Check if already saved by regex step
+        # Check if original_messages was already populated (e.g., by a previous regex step)
+        # and is not None.
+        original_messages_already_captured = processed_example.get("original_messages") is not None
 
         for i, message_obj_from_input in enumerate(current_messages_for_processing):
             # message_obj_from_input is from the actual input (e.g. regex-anonymized)
@@ -285,10 +289,12 @@ def process_example_with_llm(
                 anonymized_content_this_message = anonymize_text_with_llm_results(
                     original_content_of_this_message, pii_results_msg, llm_pii_categories_found_overall
                 )
-                if anonymized_content_this_message != original_content_of_this_message and not original_messages_saved:
-                    # Save the entire original messages list from *before* LLM anonymization of any message
-                    processed_example["original_messages"] = copy.deepcopy(current_messages_for_processing)
-                    original_messages_saved = True
+                if anonymized_content_this_message != original_content_of_this_message:
+                    if not original_messages_already_captured:
+                        # If original_messages haven't been captured by a prior step (e.g. regex),
+                        # and LLM makes a change, then current_messages_for_processing are the "originals" for this field.
+                        processed_example["original_messages"] = copy.deepcopy(current_messages_for_processing)
+                        original_messages_already_captured = True # Mark as captured for subsequent messages in this example
                 message_copy_for_output["content"] = anonymized_content_this_message
             
             anonymized_messages_list_for_output.append(message_copy_for_output)
@@ -297,7 +303,7 @@ def process_example_with_llm(
 
     # --- Process completion ---
     current_completion_for_processing = processed_example.get("completion", "")
-    original_completion_saved = "original_completion" in processed_example
+    original_completion_already_captured = processed_example.get("original_completion") is not None
 
     if isinstance(current_completion_for_processing, str) and current_completion_for_processing.strip():
         pii_results_compl = get_llm_pii_analysis(
@@ -309,9 +315,12 @@ def process_example_with_llm(
             anonymized_completion_text = anonymize_text_with_llm_results(
                 current_completion_for_processing, pii_results_compl, llm_pii_categories_found_overall
             )
-            if anonymized_completion_text != current_completion_for_processing and not original_completion_saved:
-                processed_example["original_completion"] = current_completion_for_processing
-                original_completion_saved = True # Not strictly needed here as it's the last field
+            if anonymized_completion_text != current_completion_for_processing:
+                if not original_completion_already_captured:
+                     # If original_completion hasn't been captured by a prior step,
+                     # and LLM makes a change, then current_completion_for_processing is the "original" for this field.
+                    processed_example["original_completion"] = current_completion_for_processing
+                    # No need to set original_completion_already_captured = True here as it's the end of completion processing
             processed_example["completion"] = anonymized_completion_text
 
     # Store LLM anonymization details
