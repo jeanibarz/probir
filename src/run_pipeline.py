@@ -2,14 +2,35 @@ import yaml
 import subprocess
 import logging
 import os
+import sys # Added for sys.exit
 import argparse
 import shlex
 import json # Added for checkpointing
-from typing import Optional, List, Dict, Any # Added List, Dict, Any
-from common_utils import setup_logging, load_jsonl_dataset, save_jsonl_dataset, BaseTrace, validate_dataset, ensure_dir_exists, Dataset # Added validation imports and Dataset for saving invalid
+import uuid # Added for trace_id generation
+from typing import Optional, List, Dict, Any, Type # Added List, Dict, Any, Type
+from pydantic import ValidationError, BaseModel # Added for Pydantic config validation
+from common_utils import (
+    setup_logging,
+    load_jsonl_dataset,
+    save_jsonl_dataset,
+    validate_dataset,
+    ensure_dir_exists,
+    Dataset,
+    PipelineConfig,
+    StepConfig,
+    # Import new per-step Pydantic models
+    BasePipelineInput,
+    SessionIdentificationOutput,
+    RegexAnonymizationOutput,
+    LlmAnonymizationOutput,
+    ComplexityScoringOutput,
+    CorrectionAnalysisOutput,
+    Message # Message is used by the models
+)
 
 # Logger will be configured by setup_logging in main
-logger = logging.getLogger(__name__)
+# Using "probir_pipeline" as the logger name to be consistent with setup_logging default
+logger = logging.getLogger("probir_pipeline")
 
 # --- Checkpoint Configuration ---
 CHECKPOINT_DIR = "logs"
@@ -20,9 +41,9 @@ def load_checkpoint(checkpoint_path: str) -> Optional[dict]:
     if os.path.exists(checkpoint_path):
         try:
             with open(checkpoint_path, 'r', encoding='utf-8') as f:
-                checkpoint_data = json.load(f)
+                checkpoint_data_dict = json.load(f)
             logger.info(f"Loaded checkpoint from {checkpoint_path}")
-            return checkpoint_data
+            return checkpoint_data_dict # Return dict directly
         except json.JSONDecodeError:
             logger.error(f"Error decoding JSON from checkpoint file: {checkpoint_path}. Ignoring checkpoint.")
         except Exception as e:
@@ -58,21 +79,23 @@ def clear_checkpoint(checkpoint_path: str) -> None:
 def parse_steps_to_run_arg(steps_arg, all_step_configs):
     """
     Parses the --steps-to-run argument (comma-separated names or 1-based indices)
-    and returns a list of actual step config objects to run.
+    and returns a list of actual StepConfig objects to run.
+    `all_step_configs` is a list of StepConfig objects.
     """
     if not steps_arg:
         return None # Indicates all enabled steps should run
 
-    selected_steps_to_execute = []
+    selected_steps_to_execute: List[StepConfig] = []
     step_identifiers = [s.strip() for s in steps_arg.split(',')]
 
-    step_map_by_name = {step_conf.get("name"): (idx, step_conf) for idx, step_conf in enumerate(all_step_configs)}
+    # Create maps using StepConfig attributes
+    step_map_by_name = {step_conf.name: (idx, step_conf) for idx, step_conf in enumerate(all_step_configs)}
     step_map_by_index = {str(idx + 1): (idx, step_conf) for idx, step_conf in enumerate(all_step_configs)}
 
-    parsed_identifier_tuples = [] 
+    parsed_identifier_tuples: List[Tuple[int, StepConfig]] = []
 
     for identifier in step_identifiers:
-        found_step_tuple = None
+        found_step_tuple: Optional[Tuple[int, StepConfig]] = None
         if identifier in step_map_by_name:
             found_step_tuple = step_map_by_name[identifier]
         elif identifier in step_map_by_index:
@@ -84,7 +107,8 @@ def parse_steps_to_run_arg(steps_arg, all_step_configs):
         if found_step_tuple not in parsed_identifier_tuples:
              parsed_identifier_tuples.append(found_step_tuple)
 
-    parsed_identifier_tuples.sort(key=lambda x: x[0])
+    # Sort by original index in the pipeline.yaml
+    parsed_identifier_tuples.sort(key=lambda x: x[0]) 
     selected_steps_to_execute = [step_conf for _, step_conf in parsed_identifier_tuples]
     
     return selected_steps_to_execute
@@ -100,165 +124,192 @@ def run_pipeline(config_path="pipeline.yaml", steps_to_run_arg=None, resume=Fals
     
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
-            config = yaml.safe_load(f)
+            raw_config = yaml.safe_load(f)
+        pipeline_config = PipelineConfig.model_validate(raw_config)
     except FileNotFoundError:
         logger.error(f"Pipeline configuration file not found: {config_path}")
-        return
+        sys.exit(1)
     except yaml.YAMLError as e:
         logger.error(f"Error parsing YAML configuration file {config_path}: {e}")
-        return
+        sys.exit(1)
+    except ValidationError as e:
+        logger.error(f"Error validating pipeline configuration from {config_path}: {e}")
+        sys.exit(1)
 
-    pipeline_name = config.get("pipeline_name", "Unnamed Pipeline")
-    default_base_input = config.get("default_base_input")
-    all_defined_steps = config.get("steps", [])
-
-    logger.info(f"Starting pipeline: {pipeline_name}")
+    logger.info(f"Starting pipeline: {pipeline_config.pipeline_name}")
     if force_rerun:
         logger.info("Force rerun enabled. Checkpoint will be ignored if 'resume' is also active.")
         clear_checkpoint(checkpoint_file_path) # Clear checkpoint on force rerun
 
-    if not default_base_input:
+    if not pipeline_config.default_base_input: # Should be caught by Pydantic if required
         logger.error("`default_base_input` not defined in pipeline configuration.")
-        return
+        sys.exit(1)
     
     # Initial determination of steps user wants to run (or all enabled if not specified)
-    steps_user_intends_to_run_configs = parse_steps_to_run_arg(steps_to_run_arg, all_defined_steps)
-    if steps_user_intends_to_run_configs is None: 
-        steps_user_intends_to_run_configs = [s for s in all_defined_steps if s.get("enabled", True)]
-    elif not steps_user_intends_to_run_configs:
+    # all_defined_steps is now pipeline_config.steps (List[StepConfig])
+    steps_user_intends_to_run_configs = parse_steps_to_run_arg(steps_to_run_arg, pipeline_config.steps)
+    if steps_user_intends_to_run_configs is None:
+        steps_user_intends_to_run_configs = [s for s in pipeline_config.steps if s.enabled]
+    elif not steps_user_intends_to_run_configs: # Empty list after parsing
         logger.info("No valid steps selected by --steps-to-run argument. Exiting.")
-        return
+        sys.exit(0) # Normal exit if no valid steps selected by user.
+
+    # --- Define mapping from step script to its output Pydantic model ---
+    STEP_SCRIPT_TO_OUTPUT_MODEL: Dict[str, Type[BaseModel]] = {
+        "src/step2b_identify_sessions.py": SessionIdentificationOutput,
+        "src/step1_anonymize_data.py": RegexAnonymizationOutput,
+        "src/step1b_anonymize_llm.py": LlmAnonymizationOutput,
+        "src/step2_score_complexity.py": ComplexityScoringOutput,
+        "src/step3_analyze_correction_patterns.py": CorrectionAnalysisOutput,
+        "tests/test_helpers/dummy_step.py": BasePipelineInput, # Added for test helper script
+    }
 
     # --- Checkpoint and Resume Logic ---
     last_completed_step_name_from_checkpoint = None
     output_from_last_completed_checkpointed_step = None
     
     if resume and not force_rerun:
-        checkpoint = load_checkpoint(checkpoint_file_path)
-        if checkpoint and checkpoint.get("pipeline_config_path") == os.path.abspath(config_path):
-            last_completed_step_name_from_checkpoint = checkpoint.get("last_completed_step_name")
-            output_from_last_completed_checkpointed_step = checkpoint.get("last_output_file")
+        checkpoint_dict = load_checkpoint(checkpoint_file_path) # Returns a dict or None
+        if checkpoint_dict and checkpoint_dict.get("pipeline_config_path") == os.path.abspath(config_path):
+            last_completed_step_name_from_checkpoint = checkpoint_dict.get("last_completed_step_name")
+            output_from_last_completed_checkpointed_step = checkpoint_dict.get("last_output_file")
             
             if last_completed_step_name_from_checkpoint and output_from_last_completed_checkpointed_step:
                 logger.info(f"Attempting to resume pipeline after step: '{last_completed_step_name_from_checkpoint}'.")
                 logger.info(f"Output from last completed step was: {output_from_last_completed_checkpointed_step}")
 
-                # If no specific steps were requested via CLI, adjust steps_user_intends_to_run_configs
-                if steps_to_run_arg is None:
+                if steps_to_run_arg is None: # If no specific steps were requested via CLI
                     try:
-                        # Find the index of the last completed step in the *full list of defined steps*
                         last_completed_idx_in_all_steps = -1
-                        for idx, step_conf in enumerate(all_defined_steps):
-                            if step_conf.get("name") == last_completed_step_name_from_checkpoint:
+                        for idx, step_conf_obj in enumerate(pipeline_config.steps):
+                            if step_conf_obj.name == last_completed_step_name_from_checkpoint:
                                 last_completed_idx_in_all_steps = idx
                                 break
                         
                         if last_completed_idx_in_all_steps != -1:
-                            # Filter steps_user_intends_to_run_configs to only include those *after* the last completed one
-                            # This requires knowing the original index in all_defined_steps for each config
-                            # Rebuild steps_user_intends_to_run_configs based on all_defined_steps
-                            temp_steps_to_run = []
-                            for idx, step_conf in enumerate(all_defined_steps):
-                                if idx > last_completed_idx_in_all_steps and step_conf in steps_user_intends_to_run_configs:
-                                    temp_steps_to_run.append(step_conf)
+                            temp_steps_to_run: List[StepConfig] = []
+                            for idx, step_conf_obj in enumerate(pipeline_config.steps):
+                                # Check if this step_conf_obj is in the list of steps the user intends to run
+                                # (which at this point, if steps_to_run_arg was None, means all enabled steps)
+                                if idx > last_completed_idx_in_all_steps and step_conf_obj in steps_user_intends_to_run_configs:
+                                    temp_steps_to_run.append(step_conf_obj)
                             steps_user_intends_to_run_configs = temp_steps_to_run
                             
                             if not steps_user_intends_to_run_configs:
                                 logger.info("Pipeline was previously completed or no further enabled steps after resume point. Exiting.")
-                                return
+                                sys.exit(0)
                             else:
-                                resumed_step_names = [s.get('name', 'Unnamed') for s in steps_user_intends_to_run_configs]
+                                resumed_step_names = [s.name for s in steps_user_intends_to_run_configs]
                                 logger.info(f"Resuming. Steps to execute: {', '.join(resumed_step_names)}")
-                        else:
+                        else: # Last completed step from checkpoint not found in current config
                             logger.warning(f"Last completed step '{last_completed_step_name_from_checkpoint}' from checkpoint not found in current pipeline.yaml. Running from beginning of specified/enabled steps.")
-                            output_from_last_completed_checkpointed_step = None # Invalidate, as context is lost
-                    except ValueError:
-                        logger.warning(f"Could not find last completed step '{last_completed_step_name_from_checkpoint}' in current pipeline definition. Running from beginning of specified/enabled steps.")
-                        output_from_last_completed_checkpointed_step = None # Invalidate
+                            output_from_last_completed_checkpointed_step = None 
+                    except ValueError: # Should not happen if names are unique and present
+                        logger.warning(f"Error finding last completed step '{last_completed_step_name_from_checkpoint}'. Running from beginning.")
+                        output_from_last_completed_checkpointed_step = None
                 else: # --steps-to-run was provided
                     logger.info(f"Resuming with specific steps defined by --steps-to-run. Checkpoint output '{output_from_last_completed_checkpointed_step}' will be used if first targeted step needs {{prev_output}}.")
-            else:
+            else: # Checkpoint data incomplete
                 logger.info("Checkpoint data incomplete. Starting pipeline from beginning of specified/enabled steps.")
-                output_from_last_completed_checkpointed_step = None # Invalidate
-        elif checkpoint: # Checkpoint exists but for different pipeline config
-            logger.warning(f"Checkpoint found at {checkpoint_file_path} is for a different pipeline configuration ('{checkpoint.get('pipeline_config_path')}' vs '{os.path.abspath(config_path)}'). Ignoring checkpoint.")
-            output_from_last_completed_checkpointed_step = None # Invalidate
-        # If no checkpoint or invalid, output_from_last_completed_checkpointed_step remains None
-
-    if steps_to_run_arg and not resume: # Only log this if not resuming, to avoid redundant logs
-        selected_names = [s.get('name', 'Unnamed') for s in steps_user_intends_to_run_configs]
+                output_from_last_completed_checkpointed_step = None
+        elif checkpoint_dict: # Checkpoint exists but for different pipeline config
+            logger.warning(f"Checkpoint found at {checkpoint_file_path} is for a different pipeline configuration ('{checkpoint_dict.get('pipeline_config_path')}' vs '{os.path.abspath(config_path)}'). Ignoring checkpoint.")
+            output_from_last_completed_checkpointed_step = None
+    
+    if steps_to_run_arg and not resume:
+        selected_names = [s.name for s in steps_user_intends_to_run_configs]
         logger.info(f"Targeting specific steps: {', '.join(selected_names)}")
-    
-    # This map is used to resolve {prev_output} if a step is skipped (not run in this invocation)
-    # but its output is needed by a later step that *is* run.
+
     defined_outputs_map = {}
-    for i, step_conf in enumerate(all_defined_steps):
-        step_name = step_conf.get("name", f"Defined Step {i+1}")
-        outputs_conf = step_conf.get("outputs", {})
-        main_output = outputs_conf.get("main")
-        if main_output:
-            defined_outputs_map[step_name] = main_output
-            defined_outputs_map[f"__index__{i}"] = main_output
+    for i, step_conf_obj in enumerate(pipeline_config.steps):
+        # step_conf_obj is a StepConfig instance
+        defined_outputs_map[step_conf_obj.name] = step_conf_obj.outputs.main
+        defined_outputs_map[f"__index__{i}"] = step_conf_obj.outputs.main # For index-based fallback
 
-    # This tracks the output of the most recent *actually executed* step in this run.
-    # Initialize with checkpointed output if we resumed and it's relevant.
     last_dynamically_generated_output = output_from_last_completed_checkpointed_step
-    
-    accumulated_validation_results: Dict[str, Dict[str, int]] = {} # To store validation counts per step
+    accumulated_validation_results: Dict[str, Dict[str, int]] = {}
 
-    for current_step_idx_in_yaml, step_config_from_all_steps in enumerate(all_defined_steps):
-        step_name = step_config_from_all_steps.get("name", f"Unnamed Step (YAML index {current_step_idx_in_yaml+1})")
+    # Iterate through all steps defined in pipeline.yaml to maintain order and context
+    for current_step_idx_in_yaml, step_config_from_all_steps_obj in enumerate(pipeline_config.steps):
+        # step_config_from_all_steps_obj is a StepConfig instance
+        step_name = step_config_from_all_steps_obj.name
 
-        # Determine if this step should actually be executed in this run
-        if step_config_from_all_steps not in steps_user_intends_to_run_configs:
-            # This step is not targeted for execution in this run (either disabled, not selected, or successfully completed in a resumed run).
-            # However, its defined output might be needed if a *later* step uses {prev_output}
-            # and this current step was its conceptual predecessor.
-            # We update last_dynamically_generated_output to this step's *defined* output
-            # if no dynamic output has been generated yet by a *run* step that conceptually
-            # comes after this skipped one but before the one needing {prev_output}.
-            # This is tricky. The current logic for {prev_output} already consults defined_outputs_map
-            # if last_dynamically_generated_output is None from a *run* step.
-            # For simplicity, if a step is skipped, we ensure its defined output is known for the map.
-            # The crucial part is that `last_dynamically_generated_output` should only be updated by *executed* steps.
-            # If we are skipping steps due to resume, `last_dynamically_generated_output` is already primed.
-            # If skipping for other reasons (not in `steps_user_intends_to_run_configs`),
-            # then `last_dynamically_generated_output` should persist from the last *executed* step.
+        if step_config_from_all_steps_obj not in steps_user_intends_to_run_configs:
             logger.debug(f"Step '{step_name}' is not in the execution list for this run. Skipping actual execution.")
-            continue # Skip to the next step in all_defined_steps
+            continue
 
         # --- From here, we are processing a step that IS in steps_user_intends_to_run_configs ---
-        
-        script = step_config_from_all_steps.get("script")
-        inputs_conf = step_config_from_all_steps.get("inputs", {})
-        outputs_conf = step_config_from_all_steps.get("outputs", {})
-        additional_args = step_config_from_all_steps.get("args", [])
-        description = step_config_from_all_steps.get("description", "")
+        # Access attributes directly from the StepConfig object
+        script = step_config_from_all_steps_obj.script
+        inputs_conf = step_config_from_all_steps_obj.inputs # StepInputConfig object
+        outputs_conf = step_config_from_all_steps_obj.outputs # StepOutputConfig object
+        additional_args = step_config_from_all_steps_obj.args
+        description = step_config_from_all_steps_obj.description
 
         logger.info(f"--- Evaluating Step for Execution: {step_name} ---")
         if description:
             logger.info(f"Description: {description}")
 
-        if not script:
-            logger.error(f"No script defined for step '{step_name}'. Skipping.")
-            logger.info(f"--- Finished Step: {step_name} (Error) ---\n")
-            continue
+        # Script presence is validated by Pydantic if StepConfig.script is not Optional
         
-        step_input_source_tag = inputs_conf.get("main", "")
+        step_input_source_tag = inputs_conf.main
         actual_input_file = ""
 
         if step_input_source_tag == "{base}":
-            actual_input_file = default_base_input
+            actual_input_file = pipeline_config.default_base_input
+            # --- Add trace_id to the base dataset before the first actual processing step ---
+            # This should only happen ONCE, when the input is truly the base input.
+            # And only if this is the first step in the *overall intended sequence* for this run.
+            # A simple check: if this is the first step in steps_user_intends_to_run_configs
+            # AND its input is {base}.
+            if step_config_from_all_steps_obj == steps_user_intends_to_run_configs[0]:
+                logger.info(f"Preparing base input: {actual_input_file} by adding trace_id.")
+                try:
+                    base_dataset = load_jsonl_dataset(actual_input_file)
+                    if len(base_dataset) > 0: # Only map if not empty
+                        def add_trace_id_and_version(example: Dict[str, Any]) -> Dict[str, Any]:
+                            example_copy = example.copy() # Avoid modifying original dict in dataset
+                            example_copy['trace_id'] = str(uuid.uuid4())
+                            example_copy['schema_version'] = "1.0" # Add schema version
+                            return example_copy
+                        
+                        base_dataset_with_ids = base_dataset.map(add_trace_id_and_version)
+                        
+                        # Overwrite the original base input file with the version containing trace_ids
+                        # Or, save to a temporary file and use that as actual_input_file.
+                        # For simplicity and to ensure subsequent direct uses of {base} get IDs, let's overwrite.
+                        # This assumes default_base_input is in a writable location (e.g., data/).
+                        # A safer approach might be to save to a new temp file.
+                        # For now, let's assume it's fine to modify the "base" if it's the true start.
+                        # However, this could be problematic if the original file is precious.
+                        # Let's save to a new intermediate file for the first step.
+                        
+                        # Create a new path for the input with trace_ids
+                        base_input_dir = os.path.dirname(actual_input_file)
+                        base_input_filename = os.path.basename(actual_input_file)
+                        name, ext = os.path.splitext(base_input_filename)
+                        input_with_ids_path = os.path.join(base_input_dir, f"{name}_with_trace_ids{ext}")
+                        
+                        save_jsonl_dataset(base_dataset_with_ids, input_with_ids_path)
+                        logger.info(f"Saved base input with trace_ids to: {input_with_ids_path}")
+                        actual_input_file = input_with_ids_path # Use this new file as input for the first step
+                    else:
+                        logger.info(f"Base dataset {actual_input_file} is empty. No trace_ids added.")
+                except Exception as e_traceid:
+                    logger.error(f"Failed to add trace_id to base input {actual_input_file}: {e_traceid}", exc_info=True)
+                    sys.exit(1)
+            # --- End trace_id addition ---
         elif step_input_source_tag == "{prev_output}":
-            if last_dynamically_generated_output: # Output from a previously *run* step (or checkpoint)
+            if last_dynamically_generated_output:
                 actual_input_file = last_dynamically_generated_output
-            elif current_step_idx_in_yaml > 0: # Fallback to defined output of conceptual predecessor
-                preceding_step_in_yaml_config = all_defined_steps[current_step_idx_in_yaml - 1]
-                preceding_step_name_in_yaml = preceding_step_in_yaml_config.get("name", f"Unnamed Step (YAML index {current_step_idx_in_yaml})")
+            elif current_step_idx_in_yaml > 0:
+                preceding_step_in_yaml_config_obj = pipeline_config.steps[current_step_idx_in_yaml - 1]
+                preceding_step_name_in_yaml = preceding_step_in_yaml_config_obj.name
                 
                 conceptual_prev_output_file = defined_outputs_map.get(preceding_step_name_in_yaml)
+                # Index fallback should ideally not be needed if names are unique and map is built correctly
                 if not conceptual_prev_output_file:
-                    conceptual_prev_output_file = defined_outputs_map.get(f"__index__{current_step_idx_in_yaml - 1}")
+                     conceptual_prev_output_file = defined_outputs_map.get(f"__index__{current_step_idx_in_yaml - 1}")
 
                 if conceptual_prev_output_file:
                     actual_input_file = conceptual_prev_output_file
@@ -268,44 +319,46 @@ def run_pipeline(config_path="pipeline.yaml", steps_to_run_arg=None, resume=Fals
                     logger.error(f"Cannot determine conceptual previous output for '{{prev_output}}' for step '{step_name}'. Skipping.")
                     logger.info(f"--- Finished Step: {step_name} (Error) ---\n")
                     continue
-            else: 
+            else:
                 logger.error(f"Step '{step_name}' is the first defined step and cannot use '{{prev_output}}' if no prior dynamic output (e.g. from resume). Skipping.")
                 logger.info(f"--- Finished Step: {step_name} (Error) ---\n")
                 continue
         else: 
-            actual_input_file = step_input_source_tag
+            actual_input_file = step_input_source_tag # Direct file path
         
-        if not actual_input_file:
+        if not actual_input_file: # Should be caught by Pydantic if StepInputConfig.main is not Optional
              logger.error(f"Input file for step '{step_name}' could not be determined. Skipping.")
              logger.info(f"--- Finished Step: {step_name} (Error) ---\n")
              continue
 
         if not os.path.exists(actual_input_file):
-            logger.error(f"Input file '{actual_input_file}' for step '{step_name}' does not exist. Skipping.")
-            logger.info(f"--- Finished Step: {step_name} (Error) ---\n")
-            continue
+            logger.error(f"Input file '{actual_input_file}' for step '{step_name}' does not exist. Halting pipeline.")
+            logger.info(f"--- Finished Step: {step_name} (Error - Missing Input) ---\n")
+            sys.exit(1)
             
-        step_output_target = outputs_conf.get("main")
-        if not step_output_target:
-            logger.error(f"No 'outputs.main' defined for step '{step_name}'. Cannot proceed. Skipping.")
-            logger.info(f"--- Finished Step: {step_name} (Error) ---\n")
-            continue
-        actual_output_file = step_output_target
+        actual_output_file = outputs_conf.main # outputs_conf is StepOutputConfig
 
         command = ["python", script]
         command.extend(["--input_file", actual_input_file])
         command.extend(["--output_file", actual_output_file])
         
-        # Add log_file_name argument for the individual script if not already present in step_config args
-        # Construct a unique log file name for the step
-        step_log_file_name = f"step_{step_name.lower().replace(' ', '_').replace('.', '')}.log"
+        safe_step_name_for_filename = step_name.lower().replace(' ', '_').replace('.', '').replace('/', '_')
+        step_log_file_name = f"step_{safe_step_name_for_filename}.log"
         
-        has_log_file_arg = any(isinstance(arg, str) and arg == "--log_file_name" for arg in additional_args)
+        # Check if --log_file_name is already in additional_args
+        # Note: Pydantic model for StepConfig has args as List[Any].
+        # For robust checking, convert to string if necessary or ensure args are structured.
+        # Assuming args are simple strings or numbers for now.
+        has_log_file_arg = False
+        for i in range(len(additional_args)):
+            if str(additional_args[i]) == "--log_file_name":
+                has_log_file_arg = True
+                break
+        
         if not has_log_file_arg:
             command.extend(["--log_file_name", step_log_file_name])
         
-        command.extend([str(arg) for arg in additional_args])
-
+        command.extend([str(arg) for arg in additional_args]) # Ensure all args are strings for subprocess
 
         logger.info(f"Executing command: {' '.join(shlex.quote(str(c)) for c in command)}")
         
@@ -322,11 +375,30 @@ def run_pipeline(config_path="pipeline.yaml", steps_to_run_arg=None, resume=Fals
                 logger.info(f"Validating output of step '{step_name}' from file: {actual_output_file}")
                 try:
                     # Load the dataset produced by the step
-                    produced_dataset = load_jsonl_dataset(actual_output_file) 
+                    produced_dataset = load_jsonl_dataset(actual_output_file)
                     
+                    # Determine the correct Pydantic model for this step's output
+                    # Dynamically determine project root (assuming this script is in src/)
+                    PROJECT_ROOT_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+                    script_lookup_key = script # script path from pipeline.yaml
+                    if os.path.isabs(script_lookup_key):
+                        # If absolute path is within our project, make it relative to project root
+                        if script_lookup_key.startswith(PROJECT_ROOT_PATH + os.sep):
+                            script_lookup_key = os.path.relpath(script_lookup_key, PROJECT_ROOT_PATH)
+                        # Else, it's an absolute path outside the project, use as-is for lookup.
+                        # (The map would need to contain this absolute path if such a script is used)
+                    
+                    output_model_for_step = STEP_SCRIPT_TO_OUTPUT_MODEL.get(script_lookup_key)
+                    
+                    if not output_model_for_step:
+                        logger.error(f"No output Pydantic model defined for script '{script}' (lookup key: '{script_lookup_key}') in STEP_SCRIPT_TO_OUTPUT_MODEL map. Cannot validate step '{step_name}'.")
+                        sys.exit(1) # Critical configuration error
+
+                    logger.info(f"Validating output of step '{step_name}' using model {output_model_for_step.__name__}")
                     valid_examples, invalid_examples_with_errors = validate_dataset(
-                        produced_dataset, 
-                        BaseTrace, # Using the comprehensive BaseTrace model
+                        produced_dataset,
+                        output_model_for_step, # Use the specific model for this step
                         step_name
                     )
                     
@@ -365,11 +437,11 @@ def run_pipeline(config_path="pipeline.yaml", steps_to_run_arg=None, resume=Fals
                     logger.error(f"Pipeline will continue, but output of '{step_name}' may be compromised. Checkpoint NOT saved for this state if validation failed.")
                     # Halt pipeline if validation itself fails catastrophically
                     logger.error("Pipeline execution halted due to validation error.")
-                    return
+                    sys.exit(1)
             else:
                 logger.warning(f"Output file {actual_output_file} for step '{step_name}' not found after execution. Cannot validate.")
                 logger.error(f"Pipeline execution halted because output file for step '{step_name}' was not created.")
-                return
+                sys.exit(1)
 
         except subprocess.CalledProcessError as e:
             logger.error(f"Step '{step_name}' failed with return code {e.returncode}.")
@@ -377,27 +449,27 @@ def run_pipeline(config_path="pipeline.yaml", steps_to_run_arg=None, resume=Fals
             if e.stderr: logger.error(f"STDERR:\n{e.stderr}")
             logger.info(f"--- Finished Step: {step_name} (Failed) ---\n")
             logger.error("Pipeline execution halted due to step failure.")
-            return 
+            sys.exit(1)
         except FileNotFoundError:
             logger.error(f"Script '{script}' not found for step '{step_name}'. Make sure it's in the correct path or Python's PATH.")
             logger.info(f"--- Finished Step: {step_name} (Failed) ---\n")
             logger.error("Pipeline execution halted due to missing script.")
-            return
+            sys.exit(1)
         except Exception as e:
             logger.error(f"An unexpected error occurred while running step '{step_name}': {e}", exc_info=True)
             logger.info(f"--- Finished Step: {step_name} (Failed) ---\n")
             logger.error("Pipeline execution halted due to unexpected error.")
-            return
+            sys.exit(1)
 
         logger.info(f"--- Finished Step: {step_name} --- \n")
 
-    logger.info(f"Pipeline '{pipeline_name}' finished all targeted steps successfully.")
+    logger.info(f"Pipeline '{pipeline_config.pipeline_name}' finished all targeted steps successfully.")
     # Optionally clear checkpoint on full successful run of *all originally intended steps*
     # For now, let the last successful step's checkpoint persist.
     # If all steps_user_intends_to_run_configs completed, and this list wasn't shortened by resume,
     # it implies a full run of what was asked.
     # A more robust "all complete" might involve checking if the last executed step
-    # is also the last step in all_defined_steps (among enabled ones).
+    # is also the last step in pipeline_config.steps (among enabled ones).
     # For now, this is sufficient.
 
     # --- Generate Final Report ---
@@ -405,7 +477,7 @@ def run_pipeline(config_path="pipeline.yaml", steps_to_run_arg=None, resume=Fals
         logger.info("--- Pipeline Validation Summary ---")
         total_validated_across_all_steps = 0
         total_invalid_across_all_steps = 0
-        report_lines = ["# Pipeline Execution Report", f"## Pipeline: {pipeline_name}", "## Validation Summary"]
+        report_lines = ["# Pipeline Execution Report", f"## Pipeline: {pipeline_config.pipeline_name}", "## Validation Summary"]
 
         for step_name_report, counts in accumulated_validation_results.items():
             msg = f"Step '{step_name_report}': {counts['valid']} valid, {counts['invalid']} invalid examples."

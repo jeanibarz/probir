@@ -14,10 +14,11 @@ from common_utils import (
     load_jsonl_dataset,
     save_jsonl_dataset,
     create_llm_arg_parser,
-    chunk_text, # Import from common_utils
-    BaseTrace,      # Added
-    validate_dataset # Added
+    chunk_text # Import from common_utils
+    # BaseTrace,      # Removed
+    # validate_dataset # Removed
 )
+from datasets.exceptions import DatasetGenerationError # Added for specific exception handling
 
 # Configuration constants can remain if they are specific defaults for this script,
 # but create_llm_arg_parser will provide defaults for many of these.
@@ -225,6 +226,11 @@ def main():
                         help="Max concurrent examples to process (defaults to general --max_workers if not set).")
     args = parser.parse_args()
 
+    from common_utils import load_config_value # Import the helper
+
+    resolved_ollama_model = load_config_value("OLLAMA_MODEL", args.ollama_model, "phi3:mini")
+    resolved_ollama_host = load_config_value("OLLAMA_HOST", args.ollama_host, "http://localhost:11434")
+
     log_level_int = getattr(logging, args.log_level.upper(), logging.INFO)
     setup_logging(log_level_int, args.log_file_name)
     
@@ -234,7 +240,7 @@ def main():
     if args.log_file_name:
         logger.info(f"Logs for this script will also be saved to logs/{args.log_file_name}")
     logger.info(f"Input file: {args.input_file}, Output file: {args.output_file}")
-    logger.info(f"Ollama Model: {args.ollama_model}, Host: {args.ollama_host or 'Default (localhost or OLLAMA_HOST env)'}")
+    logger.info(f"Ollama Model: {resolved_ollama_model} (Resolved), Host: {resolved_ollama_host} (Resolved)")
     logger.info(f"Chunk size (for LLM data if chunked by common_utils.chunk_text): {args.chunk_size}, Overlap: {args.chunk_overlap}")
     
     max_workers_for_examples = args.max_workers_examples if args.max_workers_examples is not None else args.max_workers
@@ -243,31 +249,31 @@ def main():
 
     try:
         ollama_client_args = {}
-        if args.ollama_host:
-            ollama_client_args['host'] = args.ollama_host
+        if resolved_ollama_host: # Use resolved value
+            ollama_client_args['host'] = resolved_ollama_host
         client = ollama.Client(**ollama_client_args)
         client.list() # Test connection
-        logger.info("Ollama client initialized successfully.")
+        logger.info(f"Ollama client initialized successfully for host: {resolved_ollama_host or 'default'}.")
     except Exception as e:
-        logger.error(f"Error initializing Ollama client: {e}", exc_info=True)
+        logger.error(f"Error initializing Ollama client for host '{resolved_ollama_host}': {e}", exc_info=True)
         return
 
     try:
         dataset = load_jsonl_dataset(args.input_file, limit=args.limit)
-    except Exception as e:
-        logger.error(f"Error loading dataset from {args.input_file}: {e}", exc_info=True)
-        return
+    except Exception as e: # General catch, as load_jsonl_dataset should handle empty file by returning empty Dataset
+        logger.error(f"Failed to load dataset from {args.input_file}: {e}", exc_info=True)
+        return # Exit if any other error occurs during loading
 
     if not dataset or len(dataset) == 0:
-        logger.info("Input dataset is empty. Nothing to process.")
+        logger.info("Input dataset is empty. Nothing to process further.")
         try:
             # Ensure an empty list is passed to Dataset.from_list for empty dataset creation
             empty_hf_dataset = Dataset.from_list([])
             save_jsonl_dataset(empty_hf_dataset, args.output_file, force_ascii=False)
             logger.info(f"Empty output file saved to {args.output_file}")
-        except Exception as e:
-            logger.error(f"Error saving empty dataset to {args.output_file}: {e}", exc_info=True)
-        return
+        except Exception as e_save:
+            logger.error(f"Error saving empty dataset to {args.output_file}: {e_save}", exc_info=True)
+        return # Exit after attempting to save empty output
         
     logger.info(f"Analyzing correction patterns for {len(dataset)} examples using model {args.ollama_model}...")
 
@@ -278,7 +284,7 @@ def main():
         # Prepare arguments for each task
         # The 6th argument to process_example_for_correction is max_workers_chunks, which should be args.max_workers
         tasks_with_args = [
-            ((idx, example), client, args.ollama_model, args.chunk_size, args.chunk_overlap, args.max_workers)
+            ((idx, example), client, resolved_ollama_model, args.chunk_size, args.chunk_overlap, args.max_workers) # Use resolved_ollama_model
             for idx, example in enumerate(dataset)
         ]
         
@@ -346,11 +352,12 @@ def main():
 
     logger.info("Correction pattern analysis mapping complete.")
 
-    # Validate the output dataset
-    valid_output_examples, invalid_output_examples = validate_dataset(analyzed_dataset, BaseTrace, "OutputValidation_Step3")
-    if invalid_output_examples:
-        logger.warning(f"Output validation found {len(invalid_output_examples)} invalid examples after correction analysis. These will still be saved.")
-        # Orchestrator will handle saving these.
+    # Output validation is now handled by the pipeline orchestrator (run_pipeline.py)
+    # using the specific output model for this step (CorrectionAnalysisOutput).
+    # Removing self-validation from the script itself.
+    # valid_output_examples, invalid_output_examples = validate_dataset(analyzed_dataset, BaseTrace, "OutputValidation_Step3")
+    # if invalid_output_examples:
+    #     logger.warning(f"Output validation found {len(invalid_output_examples)} invalid examples after correction analysis. These will still be saved.")
 
     logger.info(f"Saving analyzed dataset to: {args.output_file}")
     try:

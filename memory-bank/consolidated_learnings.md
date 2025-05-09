@@ -156,3 +156,83 @@ This document contains curated, summarized, and actionable insights derived from
     2. Construct the new log entry.
     3. Combine the existing content and the new entry.
     4. Use `write_to_file` with the *full combined content* to update the log file.
+
+## Testing & Pytest
+
+**Pattern: Pytest Setup for `src/` Layout**
+- To ensure `pytest` can correctly discover and import modules from a `src/` project layout:
+    1.  Ensure `pytest` is a project dependency (e.g., in `pyproject.toml`).
+    2.  Install the project in editable mode: `uv pip install -e .` (or `pip install -e .`). This makes the `src` package available in the environment.
+    3.  Add `pythonpath = ["src"]` under `[tool.pytest.ini_options]` in `pyproject.toml`. This explicitly tells `pytest` to add the `src` directory to its Python path.
+    4.  Run `pytest` using `python -m pytest`. This ensures `pytest` runs within the context of the project's Python environment, where all dependencies are correctly installed and paths are set up.
+- *Rationale:* Addresses common `ModuleNotFoundError` issues when testing projects with a `src/` layout by ensuring `pytest` can find the source modules and their dependencies.
+
+**Pattern: Testing `logging.FileHandler` Mocking**
+- When mocking `logging.FileHandler` (or its methods like `setLevel`) for tests:
+    - The `logging` framework internally checks `record.levelno >= handler.level`. The `handler.level` attribute must be an integer.
+    - If `FileHandler.setLevel` is mocked, ensure the mock handler instance's `level` attribute is also set to an integer value. This can be done using a `side_effect` on the `setLevel` mock that updates `mock_instance.level`.
+    - *Example `side_effect` for a mock `FileHandler` instance:*
+      ```python
+      def set_level_side_effect(level_value):
+          mock_handler_instance.level = level_value # mock_handler_instance is the mocked FileHandler
+          # Call original setLevel if needed, or just set the attribute
+      mock_handler_instance.setLevel.side_effect = set_level_side_effect
+      ```
+- *Rationale:* Prevents `TypeError` during logging operations in tests due to incompatible types for handler levels.
+
+**Pattern: Robust Log Assertions**
+- When asserting log messages, especially those containing complex data structures (e.g., Pydantic error dicts, sets, or long strings):
+    - Exact string matching can be brittle due to minor formatting differences or non-deterministic order of elements (e.g., in sets or dictionary string representations).
+    - Prefer checking for the presence of key substrings within the logged message.
+    - If logged data is structured (e.g., JSON within the log), consider deserializing it and asserting against the structure or specific values.
+    - Use `caplog.text` for a single string of all logs, or iterate `caplog.records` (or `mock_logger.method.call_args_list`) for more granular checks.
+- *Rationale:* Makes tests less prone to failures from trivial log message variations, focusing on the essential content.
+
+**Pattern: Testing File I/O Across Processes (Synchronization)**
+- When a test involves a parent process checking a file created/modified by a subprocess (e.g., in `pytest` using `tmp_path`):
+    - Be aware of potential file system synchronization or visibility delays. `os.path.exists()` in the parent might return `False` immediately after the subprocess writes the file.
+    - If direct file access from the parent is unreliable, consider:
+        - Introducing short, careful delays (use with caution, can make tests flaky).
+        - Having the subprocess log a confirmation of file write completion.
+        - Designing the test to verify the outcome through other means (e.g., subprocess exit code, other reported metrics, or having the subprocess perform a read-back verification itself if possible).
+- *Rationale:* Addresses flakiness in tests that depend on immediate cross-process file visibility.
+
+**Pattern: Testing Orchestrators with Dummy Steps**
+- For testing pipeline orchestrators that execute multiple steps (often as subprocesses):
+    1.  Create a `pytest` fixture to set up a temporary test environment (e.g., using `tmp_path`). This includes directories for inputs, outputs, logs, and checkpoints.
+    2.  Develop simple "dummy" step scripts. These scripts should be configurable (e.g., via CLI args or environment variables) to simulate various outcomes: success, failure (non-zero exit code), specific data transformations, producing valid/invalid data, and specific logging.
+    3.  Dynamically generate test-specific pipeline configuration files (e.g., `pipeline.yaml`) within the fixture. These configs should point to the temporary data paths and the dummy step scripts. Use `Path(path_str).as_posix()` for platform-independent paths in generated files.
+    4.  The orchestrator tests then invoke the orchestrator script, targeting these temporary configurations and dummy steps.
+- *Rationale:* Allows isolated, repeatable, and comprehensive testing of orchestrator logic (sequencing, error handling, checkpointing, reporting) without the overhead or flakiness of running real, complex steps.
+
+## Git Workflow
+
+**Pattern: `git mv` to an Ignored Directory**
+- If you use `git mv old_path new_path` and `new_path` (or its containing directory) is covered by `.gitignore`:
+    - The file at `new_path` will become untracked and ignored by Git.
+    - The commit will reflect the *deletion* of `old_path`. The file at `new_path` will not be part of the commit's tracked tree.
+    - `git status` will show `old_path` as deleted and `new_path` as untracked (if it exists and is ignored).
+- *Rationale:* Understanding this behavior is crucial for correctly managing files moved into ignored locations (e.g., build artifacts, local logs, temporary data).
+
+**Pattern: Correcting Commits - Removing Files**
+- To remove a file that was accidentally committed or to stop tracking a file that should now be ignored:
+    1.  `git rm --cached <file_to_remove_from_tracking>`: This unstages the file and removes it from Git's index, but leaves the physical file in your working directory.
+    2.  Ensure the file is listed in `.gitignore` if it should be ignored going forward.
+    3.  `git commit --amend --no-edit`: This updates the previous commit, removing the file from its history, without changing the commit message. If you need to change the message, omit `--no-edit`.
+- *Rationale:* Provides a clean way to correct the history of the last commit.
+
+## Project `probir` Specifics - Testing & Data Structures
+
+**`step1b_anonymize_llm.py` - Output Structure & Placeholders:**
+- The script `src/step1b_anonymize_llm.py` produces an `llm_anonymization_details` dictionary with the following structure:
+  ```python
+  {
+      "llm_sensitive_categories_found": sorted(list(overall_llm_pii_categories)),
+      "llm_detected_pii_items_messages": list_of_pii_item_dicts_for_messages,
+      "llm_detected_pii_items_completion": list_of_pii_item_dicts_for_completion
+  }
+  ```
+  - Each `pii_item_dict` in the lists is `{"category": "...", "value": "..."}`.
+- Tests asserting this structure must use these exact keys (e.g., `llm_detected_pii_items_messages`) and access PII item details using `pii_item["category"]`.
+- The anonymization placeholder format used by this script is `[CATEGORY_REDACTED]`. Test data and assertions for anonymized strings must match this format.
+- *Rationale:* Ensures tests accurately reflect the script's output, preventing false negatives/positives.

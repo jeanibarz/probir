@@ -6,9 +6,9 @@ from common_utils import (
     setup_logging, 
     load_jsonl_dataset, 
     save_jsonl_dataset, 
-    create_default_arg_parser,
-    BaseTrace,      # Added
-    validate_dataset # Added
+    create_default_arg_parser
+    # BaseTrace,      # Removed
+    # validate_dataset # Removed
 )
 
 logger = logging.getLogger(__name__)
@@ -167,11 +167,12 @@ def main():
 
     logger.info("Anonymization mapping complete.")
 
-    # Validate the output dataset
-    valid_output_examples, invalid_output_examples = validate_dataset(processed_dataset, BaseTrace, "OutputValidation_Step1")
-    if invalid_output_examples:
-        logger.warning(f"Output validation found {len(invalid_output_examples)} invalid examples after regex anonymization. These will still be saved.")
-        # The run_pipeline.py orchestrator will handle saving these separately.
+    # Output validation is now handled by the pipeline orchestrator (run_pipeline.py)
+    # using the specific output model for this step (RegexAnonymizationOutput).
+    # Removing self-validation from the script itself.
+    # valid_output_examples, invalid_output_examples = validate_dataset(processed_dataset, BaseTrace, "OutputValidation_Step1")
+    # if invalid_output_examples:
+    #     logger.warning(f"Output validation found {len(invalid_output_examples)} invalid examples after regex anonymization. These will still be saved.")
     
     try:
         save_jsonl_dataset(processed_dataset, args.output_file, force_ascii=False)

@@ -6,9 +6,9 @@ from common_utils import (
     setup_logging, 
     create_default_arg_parser,
     load_jsonl_dataset, # Added
-    save_jsonl_dataset, # Added
-    BaseTrace,          # Added
-    validate_dataset    # Added
+    save_jsonl_dataset # Added
+    # BaseTrace,          # Removed
+    # validate_dataset    # Removed
 )
 
 # Logger will be configured in main() by setup_logging
@@ -81,15 +81,11 @@ def main():
         logger.error(f"Failed to load input dataset: {e}", exc_info=True)
         return
 
-    # Validate input dataset (optional, but good practice)
-    # We expect the input to conform to at least the basic parts of BaseTrace
-    # (messages, completion)
-    valid_input_examples, invalid_input_examples = validate_dataset(input_dataset, BaseTrace, "InputValidation_Step2b")
-    if invalid_input_examples:
-        logger.warning(f"Found {len(invalid_input_examples)} invalid examples in the input. These will be skipped or may cause errors.")
-        # Depending on strictness, one might choose to filter `valid_input_examples`
-        # For now, we proceed with `input_dataset` which might contain them.
-        # A stricter approach: input_dataset = Dataset.from_list(valid_input_examples)
+    # Input validation is handled by the orchestrator if this script is part of a pipeline.
+    # If run standalone, the user is responsible for providing data that at least has 'messages' and 'completion'.
+    # valid_input_examples, invalid_input_examples = validate_dataset(input_dataset, BaseTrace, "InputValidation_Step2b")
+    # if invalid_input_examples:
+    #     logger.warning(f"Found {len(invalid_input_examples)} invalid examples in the input. These will be skipped or may cause errors.")
 
     processed_examples = [] # To store successfully processed examples as dicts
     
@@ -178,12 +174,12 @@ def main():
             logger.error(f"Failed to create Hugging Face Dataset from processed examples: {e}", exc_info=True)
             return # Exit if dataset creation fails
 
-    # Validate the output dataset before saving (good practice)
-    valid_output_examples, invalid_output_examples = validate_dataset(output_dataset, BaseTrace, "OutputValidation_Step2b")
-    if invalid_output_examples:
-        logger.warning(f"Output validation found {len(invalid_output_examples)} invalid examples. These will still be saved.")
-        # Further actions could be taken here, e.g., saving invalid ones separately or halting.
-        # For now, we just log. The run_pipeline.py orchestrator will also log and save them.
+    # Output validation is now handled by the pipeline orchestrator (run_pipeline.py)
+    # using the specific output model for this step (SessionIdentificationOutput).
+    # Removing self-validation from the script itself.
+    # valid_output_examples, invalid_output_examples = validate_dataset(output_dataset, BaseTrace, "OutputValidation_Step2b")
+    # if invalid_output_examples:
+    #     logger.warning(f"Output validation found {len(invalid_output_examples)} invalid examples. These will still be saved.")
 
     # Save the output dataset using common_utils
     try:

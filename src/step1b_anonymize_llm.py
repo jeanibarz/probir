@@ -13,9 +13,9 @@ from common_utils import (
     load_jsonl_dataset,
     save_jsonl_dataset,
     create_llm_arg_parser,
-    chunk_text,
-    BaseTrace,      # Added
-    validate_dataset # Added
+    chunk_text
+    # BaseTrace,      # Removed
+    # validate_dataset # Removed
 )
 
 logger = logging.getLogger(__name__)
@@ -334,6 +334,13 @@ def process_example_with_llm(
     for old_key in ["final_anonymized_messages", "final_anonymized_completion", "llm_sensitive_categories_found"]:
         if old_key in processed_example:
             del processed_example[old_key]
+
+    # Ensure optional fields managed by this step are present, defaulting to None if not set.
+    # This helps maintain a consistent schema for the Hugging Face datasets library.
+    if "original_messages" not in processed_example:
+        processed_example["original_messages"] = None
+    if "original_completion" not in processed_example:
+        processed_example["original_completion"] = None
             
     return processed_example
 
@@ -345,6 +352,16 @@ def main():
     # --ollama_host, --ollama_model, --chunk_size, --chunk_overlap, --max_workers from create_llm_arg_parser
     args = parser.parse_args()
 
+    # Resolve config values using the new helper
+    # common_utils.load_config_value will handle CLI > ENV > .env > default hierarchy
+    # Ensure load_config_value is imported or defined if this script is run standalone without full project context
+    # For now, assuming it's available via common_utils
+    from common_utils import load_config_value 
+    
+    resolved_ollama_model = load_config_value("OLLAMA_MODEL", args.ollama_model, "phi3:mini")
+    resolved_ollama_host = load_config_value("OLLAMA_HOST", args.ollama_host, "http://localhost:11434")
+
+
     log_level_int = getattr(logging, args.log_level.upper(), logging.INFO)
     setup_logging(log_level_int, args.log_file_name) # Pass log_file_name
 
@@ -354,20 +371,21 @@ def main():
     if args.log_file_name:
         logger.info(f"Logs for this script will also be saved to logs/{args.log_file_name}")
     logger.info(f"Input file: {args.input_file}, Output file: {args.output_file}")
-    logger.info(f"Ollama Model: {args.ollama_model}, Host: {args.ollama_host or 'Default (localhost or OLLAMA_HOST env)'}")
+    logger.info(f"Ollama Model: {resolved_ollama_model} (Resolved), Host: {resolved_ollama_host} (Resolved)")
     logger.info(f"Chunk size: {args.chunk_size}, Overlap: {args.chunk_overlap}, Max workers: {args.max_workers}")
     if args.limit:
         logger.info(f"Processing limit: {args.limit} examples.")
 
     try:
         ollama_client_args = {}
-        if args.ollama_host:
-            ollama_client_args['host'] = args.ollama_host
+        if resolved_ollama_host: # Use resolved value
+            ollama_client_args['host'] = resolved_ollama_host
         ollama_client = ollama.Client(**ollama_client_args)
+        # Test connection by listing models, using the resolved model name if needed for specific checks (not strictly necessary for .list())
         ollama_client.list() 
-        logger.info("Ollama client initialized successfully.")
+        logger.info(f"Ollama client initialized successfully for host: {resolved_ollama_host or 'default'}.")
     except Exception as e:
-        logger.error(f"Error initializing Ollama client or listing models: {e}", exc_info=True)
+        logger.error(f"Error initializing Ollama client or listing models for host '{resolved_ollama_host}': {e}", exc_info=True)
         logger.error("Please ensure Ollama is running and the specified model is available.")
         sys.exit(1) # Changed to exit with error code
 
@@ -386,7 +404,7 @@ def main():
             example, 
             idx, 
             ollama_client,
-            args.ollama_model, 
+            resolved_ollama_model, # Use resolved value
             chunk_size=args.chunk_size,
             chunk_overlap=args.chunk_overlap,
             max_workers=args.max_workers
@@ -397,11 +415,12 @@ def main():
 
     logger.info("LLM-based anonymization mapping complete.")
 
-    # Validate the output dataset
-    valid_output_examples, invalid_output_examples = validate_dataset(anonymized_dataset_llm, BaseTrace, "OutputValidation_Step1b")
-    if invalid_output_examples:
-        logger.warning(f"Output validation found {len(invalid_output_examples)} invalid examples after LLM anonymization. These will still be saved.")
-        # Orchestrator will save these separately.
+    # Output validation is now handled by the pipeline orchestrator (run_pipeline.py)
+    # using the specific output model for this step (LlmAnonymizationOutput).
+    # Removing self-validation from the script itself.
+    # valid_output_examples, invalid_output_examples = validate_dataset(anonymized_dataset_llm, BaseTrace, "OutputValidation_Step1b")
+    # if invalid_output_examples:
+    #     logger.warning(f"Output validation found {len(invalid_output_examples)} invalid examples after LLM anonymization. These will still be saved.")
     
     try:
         save_jsonl_dataset(anonymized_dataset_llm, args.output_file, force_ascii=False)

@@ -7,3 +7,7 @@ filtered_traffic_log.db
 *.log
 data/
 .coverage
+
+# Coverage reports
+coverage.xml
+coverage*.xml

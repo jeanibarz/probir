@@ -13,7 +13,7 @@ steps:
       main: "{base}"
     outputs:
       main: "data/sft_dataset_S1_sessionized.jsonl" # S1 for Step 1 in new order
-    args: []
+    args: ["--limit", "13"]
     description: "Adds session_id and turn_in_session_id to traces."
 
   - name: "2. Regex-based Anonymization"
@@ -23,7 +23,7 @@ steps:
       main: "{prev_output}"
     outputs:
       main: "data/sft_dataset_S2_anonymized_regex.jsonl"
-    args: []
+    args: ["--limit", "13"]
     description: "Applies regex-based anonymization."
 
   - name: "3. LLM-based Anonymization"
@@ -33,7 +33,7 @@ steps:
       main: "{prev_output}"
     outputs:
       main: "data/sft_dataset_S3_anonymized_llm.jsonl"
-    args: ["--chunk_size", "10000", "--chunk_overlap", "1000", "--max_workers", "10", "--ollama_model", "myaniu/qwen2.5-1m:7b", "--ollama_host", "http://10.0.2.2:11434"]
+    args: ["--limit", "13", "--chunk_size", "10000", "--chunk_overlap", "1000", "--max_workers", "10", "--ollama_model", "myaniu/qwen2.5-1m:7b", "--ollama_host", "http://10.0.2.2:11434"]
     description: "Applies LLM-based PII detection and anonymization."
 
   - name: "4. Heuristic Complexity Scoring"
@@ -43,7 +43,7 @@ steps:
       main: "{prev_output}"
     outputs:
       main: "data/sft_dataset_S4_complexity_scored.jsonl"
-    args: []
+    args: ["--limit", "13"]
     description: "Calculates heuristic complexity scores for traces."
 
   - name: "5. Feedback/Correction Pattern Analysis"
@@ -53,5 +53,5 @@ steps:
       main: "{prev_output}"
     outputs:
       main: "data/sft_dataset_S5_correction_analyzed.jsonl"
-    args: ["--ollama_model", "myaniu/qwen2.5-1m:7b", "--ollama_host", "http://10.0.2.2:11434"] # Added model and host
+    args: ["--limit", "13", "--ollama_model", "myaniu/qwen2.5-1m:7b", "--ollama_host", "http://10.0.2.2:11434"] # Added model and host
     description: "Analyzes traces for feedback and correction patterns using an LLM."

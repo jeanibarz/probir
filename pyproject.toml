@@ -9,7 +9,8 @@ description = "Scripts for processing LLM interaction traces."
         "pydantic",
         "PyYAML",
         "pytest",
-        "pytest-cov"
+        "pytest-cov",
+        "python-dotenv>=1.0.0" # Added for .env file loading
     ]
 
     [build-system]

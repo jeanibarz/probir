@@ -2,62 +2,113 @@ import argparse
 import json
 import logging
 import sys
-import os # Added for ensure_dir_exists
+import os
 from typing import List, Tuple, Dict, Optional, Any, Union
+from dotenv import load_dotenv # Added for .env file loading
 
 from datasets import Dataset, Features, Value, Sequence # Added for Dataset type hints
 from pydantic import BaseModel, ValidationError, field_validator # Added for Pydantic
 
 # --- Logger Setup ---
 # Global logger instance, configured by setup_logging
-logger = logging.getLogger("probir_pipeline") # Renamed for clarity
+# Using "probir_pipeline" as the logger name for messages from common_utils itself,
+# but setup_logging will configure the root logger.
+logger = logging.getLogger("probir_pipeline") 
 
 DEFAULT_LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 
 def setup_logging(level=logging.INFO, log_file_name: Optional[str] = None, log_format: str = DEFAULT_LOG_FORMAT):
     """
-    Configures logging for the application.
+    Configures the root logger for the application.
     Logs to console and optionally to a file.
     """
-    # Ensure logger is clean (important if this function is called multiple times)
-    for handler in logger.handlers[:]:
-        logger.removeHandler(handler)
+    root_logger = logging.getLogger() # Get the root logger
+
+    # If we want to avoid adding duplicate handlers, we could check existing ones.
+    # For now, to fix caplog, we will not remove existing handlers.
+    # This might lead to duplicate handlers if setup_logging is called multiple times
+    # in a context other than isolated pytest tests.
+    # However, pytest's caplog relies on its handler NOT being removed.
     
-    logger.setLevel(level)
+    # Set level on root logger. If called multiple times, this is fine.
+    root_logger.setLevel(level)
     formatter = logging.Formatter(log_format)
 
     # Console Handler
     ch = logging.StreamHandler(sys.stdout) # Changed from stderr to stdout
     ch.setLevel(level)
     ch.setFormatter(formatter)
-    logger.addHandler(ch)
+    root_logger.addHandler(ch)
 
     # File Handler (if log_file_name is provided)
     if log_file_name:
-        # Ensure the directory for the log file exists
-        log_dir = os.path.dirname(log_file_name)
-        if log_dir and not os.path.exists(log_dir):
-            try:
-                os.makedirs(log_dir, exist_ok=True)
-                logger.info(f"Created log directory: {log_dir}")
-            except OSError as e:
-                # Use a basic print here as logger might not be fully set up or could recurse
-                print(f"Error creating log directory {log_dir}: {e}", file=sys.stderr)
-                # Fallback: don't use file logging if dir creation fails
-                log_file_name = None # Prevent further errors with this handler
+        # Determine the full path for the log file
+        if os.path.isabs(log_file_name) or os.path.dirname(log_file_name): # If log_file_name already includes a path or is absolute
+            full_log_path = log_file_name
+        else: # log_file_name is just a filename, prepend default log_dir "logs"
+            full_log_path = os.path.join("logs", log_file_name)
 
-        if log_file_name: # Re-check in case it was set to None
+        log_dir_for_file = os.path.dirname(full_log_path)
+        
+        if log_dir_for_file and not os.path.exists(log_dir_for_file):
             try:
-                fh = logging.FileHandler(log_file_name, mode='a') # Append mode
+                os.makedirs(log_dir_for_file, exist_ok=True)
+                # Temporarily use print for this specific info as logger might not have file handler yet
+                print(f"INFO (pre-log): Created log directory: {log_dir_for_file}")
+            except OSError as e:
+                print(f"Error creating log directory {log_dir_for_file}: {e}", file=sys.stderr)
+                full_log_path = None # Fallback: don't use file logging if dir creation fails
+
+        if full_log_path:
+            try:
+                fh = logging.FileHandler(full_log_path, mode='a') # Append mode
                 fh.setLevel(level)
                 fh.setFormatter(formatter)
-                logger.addHandler(fh)
-                logger.info(f"Logging to file: {log_file_name}")
+                root_logger.addHandler(fh)
+                # This message will now go to the file as well, if setup is successful
+                # Use the local 'logger' instance for messages from common_utils itself,
+                # or directly use root_logger if preferred for this specific message.
+                logging.getLogger().info(f"Logging to file: {full_log_path}") # Changed to root_logger for this message
             except Exception as e:
-                print(f"Error setting up file handler for {log_file_name}: {e}", file=sys.stderr)
+                print(f"Error setting up file handler for {full_log_path}: {e}", file=sys.stderr)
     
-    logger.info(f"Logging initialized with level {logging.getLevelName(level)}.")
+    logging.getLogger().info(f"Logging initialized with level {logging.getLevelName(level)}.") # Changed to root_logger
 
+
+# --- Config & Secrets Loading Helper ---
+def load_config_value(var_name: str, cli_value: Optional[Any], default_value: Optional[Any] = None, is_bool: bool = False) -> Optional[Any]:
+    """
+    Loads a configuration value based on a hierarchy:
+    1. CLI argument (if provided and not None)
+    2. Environment variable (uppercase var_name)
+    3. Value from .env file (uppercase var_name)
+    4. Default value
+    Returns None if no value is found and no default is provided.
+    For boolean flags, ENV/'.env' values 'true', '1', 'yes' are True; 'false', '0', 'no' are False.
+    """
+    load_dotenv() # Loads .env file into environment variables if .env exists
+
+    # 1. CLI argument
+    if cli_value is not None:
+        # For boolean flags from argparse (action="store_true"/"store_false"),
+        # cli_value will be True/False directly.
+        # If it's a typed arg that could be None, this check is fine.
+        return cli_value
+
+    # 2. Environment variable (potentially loaded from .env)
+    env_value_str = os.getenv(var_name.upper())
+    if env_value_str is not None:
+        if is_bool:
+            if env_value_str.lower() in ['true', '1', 'yes', 'y']:
+                return True
+            elif env_value_str.lower() in ['false', '0', 'no', 'n']:
+                return False
+            # else, fall through to default if env var is not a recognized boolean string
+        else:
+            return env_value_str # Return as string, type conversion happens later if needed
+
+    # 3. Default value (if no CLI or ENV var)
+    return default_value
 
 # --- Argument Parsers ---
 def create_default_arg_parser(description: str) -> argparse.ArgumentParser:
@@ -102,14 +153,14 @@ def create_llm_arg_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument(
         "--ollama_model",
         type=str,
-        default="phi3:mini", # A more reasonable default
-        help="Name of the Ollama model to use (e.g., 'phi3:mini', 'llama3:8b').",
+        default=None, # Default resolution will be handled by load_config_value
+        help="Name of the Ollama model. Overrides OLLAMA_MODEL env var and .env file. (Default: 'phi3:mini' if not set elsewhere).",
     )
     parser.add_argument(
         "--ollama_host",
         type=str,
-        default="http://localhost:11434", # Default to localhost
-        help="URL of the Ollama API host (default: http://localhost:11434).",
+        default=None, # Default resolution will be handled by load_config_value
+        help="URL of the Ollama API host. Overrides OLLAMA_HOST env var and .env file. (Default: 'http://localhost:11434' if not set elsewhere).",
     )
     parser.add_argument(
         "--chunk_size",
@@ -133,22 +184,96 @@ def create_llm_arg_parser(description: str) -> argparse.ArgumentParser:
 
 
 # --- Dataset I/O ---
+from datasets.exceptions import DatasetGenerationError # Ensure this is imported for specific handling
+
 def load_jsonl_dataset(file_path: str, limit: Optional[int] = None) -> Dataset:
-    """Loads a Hugging Face Dataset from a JSONL file."""
+    """Loads a Hugging Face Dataset from a JSONL file with fallback for robust loading."""
+    logger.info(f"Attempting to load dataset from {file_path}...")
+    
+    # Initial check for existence and emptiness using os functions
+    if not os.path.exists(file_path):
+        logger.error(f"Input file not found: {file_path} (checked with os.path.exists before any loading attempt)")
+        raise FileNotFoundError(f"Input file not found: {file_path}")
+
+    if os.path.getsize(file_path) == 0:
+        logger.warning(f"Input file {file_path} is empty (checked with os.path.getsize). Returning an empty dataset.")
+        return Dataset.from_list([])
+
+    full_dataset: Optional[Dataset] = None
+    dataset_loaded_source: str = "unknown"
+
     try:
-        if limit is not None:
-            dataset = Dataset.from_json(file_path, split=f"train[:{limit}]")
-            logger.info(f"Loaded {len(dataset)} examples (limited to {limit}) from {file_path}.")
+        full_dataset = Dataset.from_json(file_path)
+        dataset_loaded_source = "Dataset.from_json"
+        logger.info(f"Successfully loaded {len(full_dataset)} records from {file_path} using {dataset_loaded_source}.")
+    
+    except FileNotFoundError as e_ds_fnf:
+        logger.warning(f"Dataset.from_json raised FileNotFoundError for {file_path}: {e_ds_fnf}")
+        # Re-check existence, as Dataset.from_json might have its own view of the filesystem
+        if os.path.exists(file_path): # Check again
+            logger.warning(
+                f"File {file_path} confirmed to exist by os.path.exists, "
+                f"despite Dataset.from_json error. Attempting manual load."
+            )
+            try:
+                records = []
+                with open(file_path, "r", encoding="utf-8") as f:
+                    for line_number, line in enumerate(f, 1):
+                        try:
+                            records.append(json.loads(line))
+                        except json.JSONDecodeError as jde:
+                            logger.error(f"Manual load: JSONDecodeError in {file_path} at line {line_number}: {jde}. Skipping line.")
+                            continue # Skip malformed lines
+                
+                if not records:
+                    logger.warning(f"Manual load of existing file {file_path} resulted in no valid records. File might be empty or entirely malformed. Returning empty dataset.")
+                    return Dataset.from_list([]) # Return empty, consistent with getsize() == 0
+                
+                full_dataset = Dataset.from_list(records)
+                dataset_loaded_source = "manual JSONL parse"
+                logger.info(f"Successfully loaded {len(full_dataset)} records from {file_path} using {dataset_loaded_source}.")
+            except Exception as e_manual:
+                logger.error(f"Manual load and parse of existing file {file_path} also failed. Error: {e_manual}", exc_info=True)
+                raise e_ds_fnf from e_manual # Re-raise the original FileNotFoundError from datasets
         else:
-            dataset = Dataset.from_json(file_path) # Corrected: was load_dataset, should be from_json
-            logger.info(f"Loaded {len(dataset)} examples from {file_path}.")
-        return dataset
-    except FileNotFoundError:
-        logger.error(f"Input file not found: {file_path}")
+            logger.error(f"File {file_path} confirmed NOT to exist by os.path.exists after Dataset.from_json error. Original error: {e_ds_fnf}")
+            raise e_ds_fnf # Re-raise the original error
+
+    except DatasetGenerationError as dge:
+        cause_str = str(dge.__cause__).lower() if dge.__cause__ else ""
+        main_err_str = str(dge).lower()
+        if "schemainferenceerror" in cause_str or \
+           "please pass `features` or at least one example" in cause_str or \
+           ("empty" in main_err_str and "schema" in main_err_str):
+            logger.warning(
+                f"File {file_path} seems empty or schema cannot be inferred by Dataset.from_json. "
+                f"Returning empty dataset. Original error: {dge}"
+            )
+            return Dataset.from_list([])
+        else:
+            logger.error(f"Error loading dataset from {file_path} via Dataset.from_json: {dge}", exc_info=True)
+            raise
+    
+    except Exception as e: # Catch other unexpected errors from Dataset.from_json or initial checks
+        logger.error(f"Unexpected error loading dataset from {file_path}: {e}", exc_info=True)
         raise
-    except Exception as e:
-        logger.error(f"Error loading dataset from {file_path}: {e}", exc_info=True)
-        raise
+
+    # Apply limit if dataset was successfully loaded (either way)
+    if full_dataset is None:
+        # This should ideally not be reached if errors are re-raised properly, but as a safeguard:
+        logger.error(f"Dataset loading failed for {file_path} and full_dataset is None. Raising FileNotFoundError as a fallback.")
+        raise FileNotFoundError(f"Failed to load dataset from {file_path}, result was None.")
+
+    if limit is not None and limit > 0 and limit < len(full_dataset):
+        final_dataset = full_dataset.select(range(limit))
+        logger.info(f"Returning {len(final_dataset)} examples (limited to {limit} from {len(full_dataset)} total, loaded via {dataset_loaded_source}) from {file_path}.")
+    else:
+        final_dataset = full_dataset
+        log_msg_limit_part = f"(limit was {limit})" if limit is not None else "(no limit)"
+        logger.info(f"Returning all {len(final_dataset)} examples {log_msg_limit_part}, loaded via {dataset_loaded_source} from {file_path}.")
+    
+    return final_dataset
+
 
 def save_jsonl_dataset(dataset: Dataset, file_path: str, force_ascii: bool = False):
     """Saves a Hugging Face Dataset to a JSONL file."""
@@ -202,39 +327,80 @@ class Message(BaseModel):
     @field_validator('role')
     @classmethod
     def role_must_be_known(cls, v: str) -> str:
-        known_roles = {"system", "user", "assistant", "tool_code", "tool_outputs"} # Added tool roles
+        known_roles = {"system", "user", "assistant", "tool_code", "tool_outputs"}
         if v not in known_roles:
             raise ValueError(f"Role must be one of {known_roles}, got '{v}'")
         return v
 
-class BaseTrace(BaseModel):
+# Base model for input to the pipeline (after trace_id generation)
+class BasePipelineInput(BaseModel):
+    trace_id: str  # Mandatory unique identifier for the trace
+    schema_version: str # Version of the data schema
     messages: List[Message]
-    completion: str # This is the target completion for SFT
+    completion: str  # This is the target completion for SFT
 
-    # Optional fields that might be added by pipeline steps
-    # These allow validation to pass even if they are not present initially
-    # but will be validated if they are present.
-    trace_id: Optional[str] = None # Example: if we add a unique ID later
-    session_id: Optional[str] = None
-    turn_in_session_id: Optional[int] = None
-    original_messages: Optional[List[Message]] = None # For anonymization steps
-    original_completion: Optional[str] = None      # For anonymization steps
-    anonymization_details: Optional[Dict[str, Any]] = None
-    llm_anonymization_details: Optional[Dict[str, Any]] = None
-    complexity_score: Optional[float] = None
-    complexity_reasoning: Optional[str] = None
-    is_user_feedback_on_error: Optional[bool] = None
-    is_direct_correction: Optional[bool] = None
-    correction_similarity_score: Optional[float] = None
-    correction_analysis_details: Optional[Dict[str, Any]] = None
-    # Add other fields as they are defined by pipeline steps
+# Output schema after Step 1: Session Identification (src/step2b_identify_sessions.py)
+class SessionIdentificationOutput(BasePipelineInput):
+    session_id: str
+    turn_in_session_id: int
 
-    # Example of a model-level validator if needed
-    # @model_validator(mode='after')
-    # def check_consistency(self) -> 'BaseTrace':
-    #     if self.anonymization_details and not self.original_messages:
-    #         raise ValueError("If anonymization_details are present, original_messages must also be present.")
-    #     return self
+# Output schema after Step 2: Regex-based Anonymization (src/step1_anonymize_data.py)
+class RegexAnonymizationOutput(SessionIdentificationOutput):
+    messages: List[Message]  # Content within messages is now potentially anonymized
+    completion: str          # Completion is now potentially anonymized
+    original_messages: Optional[List[Message]] = None
+    original_completion: Optional[str] = None
+    anonymization_details: Dict[str, Any] # Details about regex patterns found
+
+# Output schema after Step 3: LLM-based Anonymization (src/step1b_anonymize_llm.py)
+class LlmAnonymizationOutput(RegexAnonymizationOutput):
+    messages: List[Message]  # Content potentially further anonymized by LLM
+    completion: str          # Completion potentially further anonymized by LLM
+    # original_messages and original_completion are inherited and updated if necessary
+    llm_anonymization_details: Dict[str, Any] # Details about LLM PII detection
+
+# Output schema after Step 4: Heuristic Complexity Scoring (src/step2_score_complexity.py)
+class ComplexityScoringOutput(LlmAnonymizationOutput):
+    complexity_score: float
+    complexity_reasoning: str
+    # Optional fields for future LLM-based complexity scoring
+    llm_complexity_score: Optional[float] = None
+    llm_complexity_rationale: Optional[str] = None
+
+# Output schema after Step 5: Feedback/Correction Pattern Analysis (src/step3_analyze_correction_patterns.py)
+# This can be considered the schema for the final output of the current pipeline.
+class CorrectionAnalysisOutput(ComplexityScoringOutput):
+    is_user_feedback_on_error: bool
+    is_assistant_self_correction: bool
+    is_assistant_error_before_correction: bool
+    correction_rationale: Optional[str] = None
+    correction_analysis_details: Dict[str, Any] # Details from LLM analysis of corrections
+
+    # The fields `is_direct_correction` and `correction_similarity_score` from the old BaseTrace
+    # were not found to be populated by current scripts, so they are omitted here.
+    # If they are needed, they can be added back.
+
+# --- Pydantic Models for Pipeline Configuration ---
+
+class StepInputConfig(BaseModel):
+    main: str
+
+class StepOutputConfig(BaseModel):
+    main: str
+
+class StepConfig(BaseModel):
+    name: str
+    script: str
+    enabled: bool = True
+    inputs: StepInputConfig
+    outputs: StepOutputConfig
+    args: List[Any] = []
+    description: Optional[str] = None
+
+class PipelineConfig(BaseModel):
+    pipeline_name: str
+    default_base_input: str
+    steps: List[StepConfig]
 
 # --- Validation Function ---
 def validate_dataset(dataset: Union[Dataset, List[Dict]], model: BaseModel, step_name: str) -> Tuple[List[Dict], List[Dict]]:
@@ -279,13 +445,24 @@ def validate_dataset(dataset: Union[Dataset, List[Dict]], model: BaseModel, step
 
 def ensure_dir_exists(dir_path: str):
     """Ensures that a directory exists, creating it if necessary."""
-    if dir_path and not os.path.exists(dir_path):
-        try:
-            os.makedirs(dir_path, exist_ok=True)
-            logger.info(f"Created directory: {dir_path}")
-        except OSError as e:
-            logger.error(f"Error creating directory {dir_path}: {e}", exc_info=True)
-            raise # Re-raise to signal failure
+    if not dir_path:
+        return # Do nothing if path is empty or None
+
+    if os.path.exists(dir_path):
+        if not os.path.isdir(dir_path):
+            err_msg = f"Path exists but is not a directory: {dir_path}"
+            logger.error(err_msg)
+            raise FileExistsError(err_msg) # More specific error
+        # Path exists and is a directory, do nothing further
+        return
+    
+    # Path does not exist, try to create it
+    try:
+        os.makedirs(dir_path, exist_ok=True) # exist_ok=True is good for multi-level creation
+        logger.info(f"Created directory: {dir_path}")
+    except OSError as e: # Catches FileExistsError if a component of path is a file during makedirs
+        logger.error(f"Error creating directory {dir_path}: {e}", exc_info=True)
+        raise # Re-raise to signal failure
 
 # Example usage (can be removed or kept for testing)
 if __name__ == '__main__':
@@ -293,55 +470,85 @@ if __name__ == '__main__':
     setup_logging(level=logging.DEBUG, log_file_name="logs/common_utils_test.log")
 
     # Test Pydantic model
-    test_data_valid = {
+    test_data_valid_base_input = {
+        "trace_id": "test-trace-001",
+        "schema_version": "1.0",
         "messages": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi"}],
         "completion": "Hi there!"
     }
-    test_data_invalid_role = {
+    test_data_invalid_role_base_input = {
+        "trace_id": "test-trace-002",
+        "schema_version": "1.0",
         "messages": [{"role": "customer", "content": "Query"}], # Invalid role
         "completion": "Response"
     }
-    test_data_missing_field = { # Missing 'completion'
+    test_data_missing_completion_base_input = { # Missing 'completion'
+        "trace_id": "test-trace-003",
+        "schema_version": "1.0",
         "messages": [{"role": "user", "content": "Test"}]
     }
+    test_data_missing_trace_id = {
+        "schema_version": "1.0",
+        "messages": [{"role": "user", "content": "Test"}],
+        "completion": "OK"
+    }
+    test_data_missing_schema_version = {
+        "trace_id": "test-trace-004",
+        "messages": [{"role": "user", "content": "Test"}],
+        "completion": "OK"
+    }
+
 
     try:
-        BaseTrace.model_validate(test_data_valid)
-        logger.info("Valid test data parsed successfully by BaseTrace.")
+        BasePipelineInput.model_validate(test_data_valid_base_input)
+        logger.info("Valid base input data parsed successfully by BasePipelineInput.")
     except ValidationError as e:
-        logger.error(f"Error validating test_data_valid: {e.errors(include_url=False)}")
+        logger.error(f"Error validating test_data_valid_base_input: {e.errors(include_url=False)}")
 
     try:
-        BaseTrace.model_validate(test_data_invalid_role)
-        logger.info("Invalid role test data parsed (this should not happen).")
+        BasePipelineInput.model_validate(test_data_invalid_role_base_input)
+        logger.info("Invalid role base input data parsed (this should not happen).")
     except ValidationError as e:
-        logger.info(f"Correctly caught validation error for invalid role: {e.errors(include_url=False)}")
+        logger.info(f"Correctly caught validation error for invalid role (BasePipelineInput): {e.errors(include_url=False)}")
     
     try:
-        BaseTrace.model_validate(test_data_missing_field)
-        logger.info("Missing field test data parsed (this should not happen).")
+        BasePipelineInput.model_validate(test_data_missing_completion_base_input)
+        logger.info("Missing completion base input data parsed (this should not happen).")
     except ValidationError as e:
-        logger.info(f"Correctly caught validation error for missing field: {e.errors(include_url=False)}")
+        logger.info(f"Correctly caught validation error for missing completion (BasePipelineInput): {e.errors(include_url=False)}")
 
-    # Test dataset validation
-    sample_dataset_list = [
-        test_data_valid,
-        test_data_invalid_role,
-        {"messages": [{"role": "system", "content": "System prompt"}], "completion": "OK", "session_id": "sess123"}, # Valid with optional field
-        test_data_missing_field
+    try:
+        BasePipelineInput.model_validate(test_data_missing_trace_id)
+        logger.info("Missing trace_id data parsed (this should not happen).")
+    except ValidationError as e:
+        logger.info(f"Correctly caught validation error for missing trace_id (BasePipelineInput): {e.errors(include_url=False)}")
+    
+    try:
+        BasePipelineInput.model_validate(test_data_missing_schema_version)
+        logger.info("Missing schema_version data parsed (this should not happen).")
+    except ValidationError as e:
+        logger.info(f"Correctly caught validation error for missing schema_version (BasePipelineInput): {e.errors(include_url=False)}")
+
+
+    # Test dataset validation using BasePipelineInput for basic structure
+    sample_dataset_list_for_base = [
+        test_data_valid_base_input,
+        test_data_invalid_role_base_input,
+        test_data_missing_trace_id,
+        test_data_missing_schema_version
     ]
     
-    logger.info("\nTesting validate_dataset function:")
-    valid_items, invalid_items = validate_dataset(sample_dataset_list, BaseTrace, "TestStep")
-    logger.info(f"From list: Valid items: {len(valid_items)}, Invalid items: {len(invalid_items)}")
+    logger.info("\nTesting validate_dataset function with BasePipelineInput:")
+    valid_items, invalid_items = validate_dataset(sample_dataset_list_for_base, BasePipelineInput, "TestStepBase")
+    logger.info(f"From list (BasePipelineInput): Valid items: {len(valid_items)}, Invalid items: {len(invalid_items)}")
     # for item in invalid_items:
     #     logger.debug(f"Invalid item details: {item}")
 
     # Test with Hugging Face Dataset
     try:
-        hf_sample_dataset = Dataset.from_list(sample_dataset_list)
-        valid_hf_items, invalid_hf_items = validate_dataset(hf_sample_dataset, BaseTrace, "TestStepHF")
-        logger.info(f"From HF Dataset: Valid items: {len(valid_hf_items)}, Invalid items: {len(invalid_hf_items)}")
+        hf_sample_dataset_base = Dataset.from_list(sample_dataset_list_for_base)
+        valid_hf_items, invalid_hf_items = validate_dataset(hf_sample_dataset_base, BasePipelineInput, "TestStepHFBase")
+        logger.info(f"From HF Dataset (BasePipelineInput): Valid items: {len(valid_hf_items)}, Invalid items: {len(invalid_hf_items)}")
         # for item in invalid_hf_items:
         #     logger.debug(f"Invalid HF item details: {item}")
     except ImportError:

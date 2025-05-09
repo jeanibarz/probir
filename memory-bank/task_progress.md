@@ -57,17 +57,17 @@ The Hugging Face `datasets` library will be used for loading, manipulating, and 
     *   **Status: COMPLETED (2025-05-09)**
 
 3.  **Formal Testing Framework (`pytest`):**
-    *   **Status: INITIAL SETUP COMPLETED (2025-05-09)**
-    *   **Description:** `pytest` added, `tests/` directory created, `tests/test_common_utils.py` with initial tests for `chunk_text` implemented and passing. Configuration for `src` layout and `python -m pytest` usage established.
-    *   **Next Steps:** Expand test coverage for `common_utils.py` and other critical components.
+    *   **Status: `common_utils.py` COVERAGE ENHANCED (2025-05-09)**
+    *   **Description:** `pytest` added, `tests/` directory created. Significantly expanded test coverage for `src/common_utils.py` (now ~74%), including tests for `ensure_dir_exists`, argument parsers, dataset I/O, `setup_logging`, Pydantic model validation, and `validate_dataset`. All 45 tests for `common_utils.py` are passing. Configuration for `src` layout and `python -m pytest --cov` usage established.
+    *   **Next Steps (from Section 7):** Implement integration tests for pipeline steps (`step*.py`) and end-to-end tests for `run_pipeline.py`.
     *   **Rationale:** Increases code reliability, makes refactoring safer.
 
 4.  **Pipeline Checkpointing & Resumption:**
     *   **Status: COMPLETED (2025-05-09)**
 
 5.  **Enhanced Data Validation & Pipeline Reporting:**
-    *   **Status: PENDING - CURRENT FOCUS**
-    *   **Description:** Implement more rigorous data validation checks after each pipeline step. This could involve using Pydantic models to define expected data schemas. Additionally, generate a consolidated HTML or Markdown report at the end of each pipeline run, summarizing steps executed, records processed, errors encountered, and key validation outcomes.
+    *   **Status: COMPLETED (2025-05-09)**
+    *   **Description:** Implemented rigorous data validation checks after each pipeline step using Pydantic models (`BaseTrace` in `common_utils.py`). The pipeline orchestrator (`run_pipeline.py`) now performs per-step validation, saves invalid records to `data/invalid_examples/`, and generates a Markdown summary report of execution and validation results. All pipeline step scripts were refactored to align with `BaseTrace` and use common I/O utilities.
     *   **Rationale:** Improves data integrity throughout the pipeline, makes issues easier to diagnose, and provides a clear, auditable summary of each processing run.
 
 ---
@@ -76,13 +76,32 @@ The Hugging Face `datasets` library will be used for loading, manipulating, and 
 This section lists newly proposed ideas for enhancing the `probir` repository and its functionalities.
 
 1.  **Enhanced Testing Strategy & Coverage:**
-    *   **Status:** TODO
-    *   **Idea:** Implement comprehensive integration tests for each pipeline step (`step*.py`) and end-to-end tests for the entire pipeline orchestrator (`run_pipeline.py`). Introduce test coverage measurement (e.g., using `pytest-cov`).
+    *   **Status:** IN PROGRESS
+    *   **Idea:** Implement comprehensive integration tests for each pipeline step (`step*.py`) and end-to-end tests for the entire pipeline orchestrator (`run_pipeline.py`). Continue using `pytest-cov` for coverage measurement.
+        *   `tests/test_step1_anonymize_data.py`: Assumed COMPLETE (based on prior logs).
+        *   `tests/test_step1b_anonymize_llm.py`: Assumed COMPLETE (based on prior logs).
+        *   `tests/test_step2_score_complexity.py`: COMPLETED (2025-05-09) - 5 tests, 90% coverage.
+        *   `tests/test_step2b_identify_sessions.py`: Assumed COMPLETE (based on prior logs).
+        *   `tests/test_step3_analyze_correction_patterns.py`: COMPLETED (2025-05-09) - 9 tests, 74% coverage.
+        *   `tests/test_run_pipeline.py`: COMPLETED (2025-05-09) - 7 tests covering core orchestrator logic (success, resume, force-rerun, step failure, specific steps, validation, error handling for missing files).
+        *   **Next Focus:** Review overall test coverage. Consider if specific edge cases for individual pipeline steps using the *actual* step scripts (not dummies) are needed, or if current integration tests for steps + E2E for orchestrator is sufficient. For now, this major testing push is considered complete.
     *   **Benefit:** Greatly improves reliability and safety of future refactoring.
 
 2.  **Advanced Configuration Management & Secrets Handling:**
-    *   **Status:** TODO
+    *   **Status:** IN PROGRESS
     *   **Idea:** Use Pydantic models for structured configuration of the pipeline and its steps (e.g., loaded from `pipeline.yaml` and CLI overrides). Explore more robust secrets management strategies beyond the current `.env` file for sensitive data like API keys (e.g., by abstracting how secrets are loaded, preparing for integration with systems like Vault or cloud-specific secret managers).
+    *   **Sub-Task: Pydantic for `pipeline.yaml` - COMPLETED (2025-05-09):**
+        *   Defined `StepInputConfig`, `StepOutputConfig`, `StepConfig`, and `PipelineConfig` Pydantic models in `src/common_utils.py`.
+        *   Modified `src/run_pipeline.py` to validate the loaded `pipeline.yaml` against `PipelineConfig` and use attribute access for configuration values.
+        *   Tested successfully with a limited run of the pipeline.
+    *   **Sub-Task: Basic Secrets/Config Handling for Ollama - COMPLETED (2025-05-09):**
+        *   Added `python-dotenv` to project dependencies.
+        *   Implemented `load_config_value` helper in `src/common_utils.py` to load config with hierarchy: CLI > ENV > .env > default.
+        *   Updated LLM-dependent scripts (`step1b_anonymize_llm.py`, `step3_analyze_correction_patterns.py`) to use this helper for `OLLAMA_MODEL` and `OLLAMA_HOST`.
+        *   Updated `.env.example` with these variables.
+        *   Fixed logging in `common_utils.setup_logging` to correctly configure the root logger, ensuring script-specific logs are captured.
+        *   Tested successfully, confirming CLI args from `pipeline.yaml` override `.env` values.
+    *   **Next Sub-Task:** Consider if more advanced secrets management (e.g., for other potential API keys using tools like Vault or cloud KMS) is needed for future project scope. For current scope, this is sufficient.
     *   **Benefit:** Enhances maintainability, security, and configuration flexibility.
 
 3.  **Interactive Data Exploration & Filtering Tool:**

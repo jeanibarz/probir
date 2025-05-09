@@ -9,9 +9,9 @@ from common_utils import (
     setup_logging,
     load_jsonl_dataset,
     save_jsonl_dataset,
-    create_default_arg_parser,
-    BaseTrace,      # Added
-    validate_dataset # Added
+    create_default_arg_parser
+    # BaseTrace,      # Removed
+    # validate_dataset # Removed
 )
 
 # Placeholder for ollama and pydantic if we use LLM-based scoring later
@@ -212,11 +212,12 @@ def main():
 
     logger.info("Complexity scoring complete.")
 
-    # Validate the output dataset
-    valid_output_examples, invalid_output_examples = validate_dataset(scored_dataset, BaseTrace, "OutputValidation_Step2")
-    if invalid_output_examples:
-        logger.warning(f"Output validation found {len(invalid_output_examples)} invalid examples after complexity scoring. These will still be saved.")
-        # Orchestrator will handle saving these.
+    # Output validation is now handled by the pipeline orchestrator (run_pipeline.py)
+    # using the specific output model for this step (ComplexityScoringOutput).
+    # Removing self-validation from the script itself.
+    # valid_output_examples, invalid_output_examples = validate_dataset(scored_dataset, BaseTrace, "OutputValidation_Step2")
+    # if invalid_output_examples:
+    #     logger.warning(f"Output validation found {len(invalid_output_examples)} invalid examples after complexity scoring. These will still be saved.")
 
     logger.info(f"Saving scored dataset to: {args.output_file}")
     try:
