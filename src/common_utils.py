@@ -3,10 +3,11 @@ import json
 import logging
 import sys
 import os
+import copy # Added for deepcopy
 from typing import List, Tuple, Dict, Optional, Any, Union
 from dotenv import load_dotenv # Added for .env file loading
 
-from datasets import Dataset, Features, Value, Sequence # Added for Dataset type hints
+from datasets import Dataset, Features as DatasetFeatures, Value, Sequence, load_dataset # Renamed Features to avoid conflict, Added for Dataset type hints
 from pydantic import BaseModel, ValidationError, field_validator # Added for Pydantic
 
 # --- Logger Setup ---
@@ -35,17 +36,23 @@ def setup_logging(level=logging.INFO, log_file_name: Optional[str] = None, log_f
     formatter = logging.Formatter(log_format)
 
     # Console Handler
-    ch = logging.StreamHandler(sys.stdout) # Changed from stderr to stdout
-    ch.setLevel(level)
-    ch.setFormatter(formatter)
-    root_logger.addHandler(ch)
+    # Check if a console handler with stdout is already present to avoid duplicates if called multiple times
+    has_stdout_handler = any(
+        isinstance(h, logging.StreamHandler) and h.stream == sys.stdout
+        for h in root_logger.handlers
+    )
+    if not has_stdout_handler:
+        ch = logging.StreamHandler(sys.stdout) 
+        ch.setLevel(level)
+        ch.setFormatter(formatter)
+        root_logger.addHandler(ch)
 
     # File Handler (if log_file_name is provided)
     if log_file_name:
         # Determine the full path for the log file
-        if os.path.isabs(log_file_name) or os.path.dirname(log_file_name): # If log_file_name already includes a path or is absolute
+        if os.path.isabs(log_file_name) or os.path.dirname(log_file_name): 
             full_log_path = log_file_name
-        else: # log_file_name is just a filename, prepend default log_dir "logs"
+        else: 
             full_log_path = os.path.join("logs", log_file_name)
 
         log_dir_for_file = os.path.dirname(full_log_path)
@@ -53,191 +60,143 @@ def setup_logging(level=logging.INFO, log_file_name: Optional[str] = None, log_f
         if log_dir_for_file and not os.path.exists(log_dir_for_file):
             try:
                 os.makedirs(log_dir_for_file, exist_ok=True)
-                # Temporarily use print for this specific info as logger might not have file handler yet
                 print(f"INFO (pre-log): Created log directory: {log_dir_for_file}")
             except OSError as e:
                 print(f"Error creating log directory {log_dir_for_file}: {e}", file=sys.stderr)
-                full_log_path = None # Fallback: don't use file logging if dir creation fails
+                full_log_path = None 
 
         if full_log_path:
-            try:
-                fh = logging.FileHandler(full_log_path, mode='a') # Append mode
-                fh.setLevel(level)
-                fh.setFormatter(formatter)
-                root_logger.addHandler(fh)
-                # This message will now go to the file as well, if setup is successful
-                # Use the local 'logger' instance for messages from common_utils itself,
-                # or directly use root_logger if preferred for this specific message.
-                logging.getLogger().info(f"Logging to file: {full_log_path}") # Changed to root_logger for this message
-            except Exception as e:
-                print(f"Error setting up file handler for {full_log_path}: {e}", file=sys.stderr)
+            # Check if a file handler for this path already exists
+            has_this_file_handler = any(
+                h.__class__.__name__ == 'FileHandler' and hasattr(h, 'baseFilename') and os.path.abspath(h.baseFilename) == os.path.abspath(full_log_path)
+                for h in root_logger.handlers
+            )
+            if not has_this_file_handler:
+                try:
+                    fh = logging.FileHandler(full_log_path, mode='a') 
+                    fh.setLevel(level)
+                    fh.setFormatter(formatter)
+                    root_logger.addHandler(fh)
+                    logging.getLogger().info(f"Logging to file: {full_log_path}") 
+                except Exception as e:
+                    print(f"Error setting up file handler for {full_log_path}: {e}", file=sys.stderr)
+            # else: # Optional: log if handler already exists
+                # logging.getLogger().debug(f"File handler for {full_log_path} already exists.")
     
-    logging.getLogger().info(f"Logging initialized with level {logging.getLevelName(level)}.") # Changed to root_logger
+    logging.getLogger().info(f"Logging initialized with level {logging.getLevelName(level)}.")
 
 
 # --- Config & Secrets Loading Helper ---
 def load_config_value(var_name: str, cli_value: Optional[Any], default_value: Optional[Any] = None, is_bool: bool = False) -> Optional[Any]:
-    """
-    Loads a configuration value based on a hierarchy:
-    1. CLI argument (if provided and not None)
-    2. Environment variable (uppercase var_name)
-    3. Value from .env file (uppercase var_name)
-    4. Default value
-    Returns None if no value is found and no default is provided.
-    For boolean flags, ENV/'.env' values 'true', '1', 'yes' are True; 'false', '0', 'no' are False.
-    """
-    load_dotenv() # Loads .env file into environment variables if .env exists
-
-    # 1. CLI argument
+    load_dotenv() 
     if cli_value is not None:
-        # For boolean flags from argparse (action="store_true"/"store_false"),
-        # cli_value will be True/False directly.
-        # If it's a typed arg that could be None, this check is fine.
         return cli_value
-
-    # 2. Environment variable (potentially loaded from .env)
     env_value_str = os.getenv(var_name.upper())
     if env_value_str is not None:
         if is_bool:
-            if env_value_str.lower() in ['true', '1', 'yes', 'y']:
-                return True
-            elif env_value_str.lower() in ['false', '0', 'no', 'n']:
-                return False
-            # else, fall through to default if env var is not a recognized boolean string
-        else:
-            return env_value_str # Return as string, type conversion happens later if needed
-
-    # 3. Default value (if no CLI or ENV var)
+            if env_value_str.lower() in ['true', '1', 'yes', 'y']: return True
+            elif env_value_str.lower() in ['false', '0', 'no', 'n']: return False
+        else: return env_value_str 
     return default_value
 
 # --- Argument Parsers ---
 def create_default_arg_parser(description: str) -> argparse.ArgumentParser:
-    """Creates a default argument parser with common arguments."""
     parser = argparse.ArgumentParser(description=description)
-    parser.add_argument(
-        "--input_file",
-        type=str,
-        required=True,
-        help="Path to the input JSONL file (or DB file for create_hf_dataset.py).",
-    )
-    parser.add_argument(
-        "--output_file",
-        type=str,
-        required=True,
-        help="Path to the output JSONL file.",
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="Optional: Number of examples to process.",
-    )
-    parser.add_argument(
-        "--log_level",
-        type=str,
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Set the logging level (default: INFO).",
-    )
-    parser.add_argument(
-        "--log_file_name",
-        type=str,
-        default=None, # Default to None, meaning console-only logging unless specified
-        help="Optional: Name of the log file. If provided, logs will be written to this file in the 'logs/' directory (e.g., 'my_script.log' becomes 'logs/my_script.log'). If None, only console logging.",
-    )
+    parser.add_argument("--input_file", type=str, required=True, help="Path to the input JSONL file.")
+    parser.add_argument("--output_file", type=str, required=True, help="Path to the output JSONL file.")
+    parser.add_argument("--limit", type=int, default=None, help="Optional: Number of examples to process.")
+    parser.add_argument("--log_level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Set the logging level.")
+    parser.add_argument("--log_file_name", type=str, default=None, help="Optional: Name of the log file.")
     return parser
 
 def create_llm_arg_parser(description: str) -> argparse.ArgumentParser:
-    """Creates an argument parser with common LLM-related arguments, inheriting default ones."""
     parser = create_default_arg_parser(description)
-    parser.add_argument(
-        "--ollama_model",
-        type=str,
-        default=None, # Default resolution will be handled by load_config_value
-        help="Name of the Ollama model. Overrides OLLAMA_MODEL env var and .env file. (Default: 'phi3:mini' if not set elsewhere).",
-    )
-    parser.add_argument(
-        "--ollama_host",
-        type=str,
-        default=None, # Default resolution will be handled by load_config_value
-        help="URL of the Ollama API host. Overrides OLLAMA_HOST env var and .env file. (Default: 'http://localhost:11434' if not set elsewhere).",
-    )
-    parser.add_argument(
-        "--chunk_size",
-        type=int,
-        default=4000,
-        help="Size of text chunks for LLM processing (default: 4000 characters).",
-    )
-    parser.add_argument(
-        "--chunk_overlap",
-        type=int,
-        default=200,
-        help="Overlap between text chunks for LLM processing (default: 200 characters).",
-    )
-    parser.add_argument(
-        "--max_workers",
-        type=int,
-        default=4, # A more conservative default
-        help="Maximum number of parallel workers for LLM processing (default: 4).",
-    )
+    parser.add_argument("--ollama_model", type=str, default=None, help="Name of the Ollama model.")
+    parser.add_argument("--ollama_host", type=str, default=None, help="URL of the Ollama API host.")
+    parser.add_argument("--chunk_size", type=int, default=4000, help="Size of text chunks for LLM processing.")
+    parser.add_argument("--chunk_overlap", type=int, default=200, help="Overlap between text chunks.")
+    parser.add_argument("--max_workers", type=int, default=4, help="Max parallel workers for LLM processing.")
     return parser
 
 
 # --- Dataset I/O ---
-from datasets.exceptions import DatasetGenerationError # Ensure this is imported for specific handling
+from datasets.exceptions import DatasetGenerationError 
 
-def load_jsonl_dataset(file_path: str, limit: Optional[int] = None) -> Dataset:
-    """Loads a Hugging Face Dataset from a JSONL file with fallback for robust loading."""
+def load_jsonl_dataset(file_path: str, limit: Optional[int] = None, features: Optional[DatasetFeatures] = None) -> Dataset:
     logger.info(f"Attempting to load dataset from {file_path}...")
+    if features:
+        logger.info(f"Explicit features provided for loading.") # Removed features object from log for brevity
     
-    # Initial check for existence and emptiness using os functions
     if not os.path.exists(file_path):
-        logger.error(f"Input file not found: {file_path} (checked with os.path.exists before any loading attempt)")
+        logger.error(f"Input file not found: {file_path}")
         raise FileNotFoundError(f"Input file not found: {file_path}")
 
     if os.path.getsize(file_path) == 0:
-        logger.warning(f"Input file {file_path} is empty (checked with os.path.getsize). Returning an empty dataset.")
+        logger.warning(f"Input file {file_path} is empty. Returning an empty dataset.")
         return Dataset.from_list([])
 
     full_dataset: Optional[Dataset] = None
     dataset_loaded_source: str = "unknown"
 
     try:
-        full_dataset = Dataset.from_json(file_path)
-        dataset_loaded_source = "Dataset.from_json"
-        logger.info(f"Successfully loaded {len(full_dataset)} records from {file_path} using {dataset_loaded_source}.")
+        if features:
+            logger.info(f"Attempting load_dataset for {file_path} with explicit features.")
+            try:
+                full_dataset = load_dataset("json", data_files=file_path, features=features, split="train")
+                dataset_loaded_source = "load_dataset (json script with explicit features)"
+                logger.info(f"Successfully loaded {len(full_dataset)} records from {file_path} using {dataset_loaded_source}.")
+            except Exception as e_load_dataset: 
+                logger.warning(f"load_dataset('json', ...) failed for {file_path} with features: {e_load_dataset}. Attempting manual parse then Dataset.from_list.")
+                try:
+                    records = []
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        for line_number, line in enumerate(f, 1):
+                            try:
+                                records.append(json.loads(line))
+                            except json.JSONDecodeError as jde:
+                                logger.error(f"Manual parse for from_list: JSONDecodeError in {file_path} at line {line_number}: {jde}. Skipping line.")
+                                continue
+                    if not records:
+                        logger.warning(f"Manual parse for from_list of {file_path} resulted in no records. Returning empty dataset with provided features.")
+                        full_dataset = Dataset.from_list([], features=features) 
+                    else:
+                        full_dataset = Dataset.from_list(records, features=features)
+                    
+                    dataset_loaded_source = "manual JSONL parse + Dataset.from_list (fallback for features)"
+                    logger.info(f"Successfully loaded {len(full_dataset)} records from {file_path} using {dataset_loaded_source}.")
+
+                except Exception as e_from_list:
+                    logger.error(f"Manual parse + Dataset.from_list also failed for {file_path} with features: {e_from_list}", exc_info=True)
+                    raise e_load_dataset 
+        else:
+            full_dataset = Dataset.from_json(file_path) 
+            dataset_loaded_source = "Dataset.from_json (schema inference)"
+            logger.info(f"Successfully loaded {len(full_dataset)} records from {file_path} using {dataset_loaded_source} with schema inference.")
     
     except FileNotFoundError as e_ds_fnf:
-        logger.warning(f"Dataset.from_json raised FileNotFoundError for {file_path}: {e_ds_fnf}")
-        # Re-check existence, as Dataset.from_json might have its own view of the filesystem
-        if os.path.exists(file_path): # Check again
-            logger.warning(
-                f"File {file_path} confirmed to exist by os.path.exists, "
-                f"despite Dataset.from_json error. Attempting manual load."
-            )
+        logger.warning(f"Dataset loading raised FileNotFoundError for {file_path}: {e_ds_fnf}")
+        if os.path.exists(file_path): 
+            logger.warning(f"File {file_path} confirmed to exist. Attempting manual load.")
             try:
                 records = []
                 with open(file_path, "r", encoding="utf-8") as f:
                     for line_number, line in enumerate(f, 1):
-                        try:
-                            records.append(json.loads(line))
-                        except json.JSONDecodeError as jde:
-                            logger.error(f"Manual load: JSONDecodeError in {file_path} at line {line_number}: {jde}. Skipping line.")
-                            continue # Skip malformed lines
-                
+                        try: records.append(json.loads(line))
+                        except json.JSONDecodeError as jde: 
+                            logger.error(f"Manual load: JSONDecodeError in {file_path} at line {line_number}: {jde}. Skipping.")
+                            continue
                 if not records:
-                    logger.warning(f"Manual load of existing file {file_path} resulted in no valid records. File might be empty or entirely malformed. Returning empty dataset.")
-                    return Dataset.from_list([]) # Return empty, consistent with getsize() == 0
-                
-                full_dataset = Dataset.from_list(records)
-                dataset_loaded_source = "manual JSONL parse"
-                logger.info(f"Successfully loaded {len(full_dataset)} records from {file_path} using {dataset_loaded_source}.")
+                    logger.warning(f"Manual load of {file_path} yielded no records. Returning empty dataset.")
+                    return Dataset.from_list([], features=features if features else None)
+                full_dataset = Dataset.from_list(records, features=features if features else None)
+                dataset_loaded_source = "manual JSONL parse (after FNF)"
+                logger.info(f"Successfully loaded {len(full_dataset)} records from {file_path} via manual parse.")
             except Exception as e_manual:
-                logger.error(f"Manual load and parse of existing file {file_path} also failed. Error: {e_manual}", exc_info=True)
-                raise e_ds_fnf from e_manual # Re-raise the original FileNotFoundError from datasets
+                logger.error(f"Manual load of {file_path} also failed: {e_manual}", exc_info=True)
+                raise e_ds_fnf from e_manual
         else:
-            logger.error(f"File {file_path} confirmed NOT to exist by os.path.exists after Dataset.from_json error. Original error: {e_ds_fnf}")
-            raise e_ds_fnf # Re-raise the original error
+            logger.error(f"File {file_path} confirmed NOT to exist. Original error: {e_ds_fnf}")
+            raise e_ds_fnf
 
     except DatasetGenerationError as dge:
         cause_str = str(dge.__cause__).lower() if dge.__cause__ else ""
@@ -245,195 +204,182 @@ def load_jsonl_dataset(file_path: str, limit: Optional[int] = None) -> Dataset:
         if "schemainferenceerror" in cause_str or \
            "please pass `features` or at least one example" in cause_str or \
            ("empty" in main_err_str and "schema" in main_err_str):
-            logger.warning(
-                f"File {file_path} seems empty or schema cannot be inferred by Dataset.from_json. "
-                f"Returning empty dataset. Original error: {dge}"
-            )
-            return Dataset.from_list([])
+            logger.warning(f"File {file_path} seems empty or schema cannot be inferred. Returning empty dataset. Error: {dge}")
+            return Dataset.from_list([], features=features if features else None)
         else:
-            logger.error(f"Error loading dataset from {file_path} via Dataset.from_json: {dge}", exc_info=True)
+            logger.error(f"Error loading dataset from {file_path}: {dge}", exc_info=True)
             raise
     
-    except Exception as e: # Catch other unexpected errors from Dataset.from_json or initial checks
+    except Exception as e: 
         logger.error(f"Unexpected error loading dataset from {file_path}: {e}", exc_info=True)
         raise
 
-    # Apply limit if dataset was successfully loaded (either way)
     if full_dataset is None:
-        # This should ideally not be reached if errors are re-raised properly, but as a safeguard:
-        logger.error(f"Dataset loading failed for {file_path} and full_dataset is None. Raising FileNotFoundError as a fallback.")
-        raise FileNotFoundError(f"Failed to load dataset from {file_path}, result was None.")
+        logger.error(f"Dataset loading failed for {file_path}, full_dataset is None. Raising error.")
+        raise RuntimeError(f"Failed to load dataset from {file_path}, result was None after all attempts.")
 
     if limit is not None and limit > 0 and limit < len(full_dataset):
         final_dataset = full_dataset.select(range(limit))
-        logger.info(f"Returning {len(final_dataset)} examples (limited to {limit} from {len(full_dataset)} total, loaded via {dataset_loaded_source}) from {file_path}.")
+        logger.info(f"Returning {len(final_dataset)} examples (limited from {len(full_dataset)}, loaded via {dataset_loaded_source}) from {file_path}.")
     else:
         final_dataset = full_dataset
-        log_msg_limit_part = f"(limit was {limit})" if limit is not None else "(no limit)"
-        logger.info(f"Returning all {len(final_dataset)} examples {log_msg_limit_part}, loaded via {dataset_loaded_source} from {file_path}.")
+        logger.info(f"Returning all {len(final_dataset)} examples (loaded via {dataset_loaded_source}) from {file_path}.")
     
     return final_dataset
 
 
 def save_jsonl_dataset(dataset: Dataset, file_path: str, force_ascii: bool = False):
-    """Saves a Hugging Face Dataset to a JSONL file."""
-    # Ensure the directory for the output file exists
     output_dir = os.path.dirname(file_path)
     if output_dir and not os.path.exists(output_dir):
-        try:
-            os.makedirs(output_dir, exist_ok=True)
-            logger.info(f"Created output directory: {output_dir}")
-        except OSError as e:
-            logger.error(f"Error creating output directory {output_dir}: {e}", exc_info=True)
-            raise # Re-raise to prevent writing to a potentially bad path
-
+        try: os.makedirs(output_dir, exist_ok=True); logger.info(f"Created output directory: {output_dir}")
+        except OSError as e: logger.error(f"Error creating output directory {output_dir}: {e}", exc_info=True); raise 
     try:
         dataset.to_json(file_path, force_ascii=force_ascii, lines=True)
         logger.info(f"Successfully saved {len(dataset)} examples to {file_path}.")
-    except Exception as e:
-        logger.error(f"Error saving dataset to {file_path}: {e}", exc_info=True)
-        raise
+    except Exception as e: logger.error(f"Error saving dataset to {file_path}: {e}", exc_info=True); raise
 
 # --- Text Processing ---
 def chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
-    """Splits text into overlapping chunks."""
-    if not text:
-        return []
-    if chunk_size <= chunk_overlap:
-        logger.warning("Chunk size should be greater than chunk overlap. Returning single chunk.")
-        return [text]
-
-    chunks = []
-    start = 0
+    if not text: return []
+    if chunk_size <= chunk_overlap: logger.warning("Chunk size <= overlap. Returning single chunk."); return [text]
+    chunks = []; start = 0
     while start < len(text):
-        end = start + chunk_size
-        chunks.append(text[start:end])
-        if end >= len(text):
-            break
+        end = start + chunk_size; chunks.append(text[start:end])
+        if end >= len(text): break
         start += chunk_size - chunk_overlap
-        # Ensure we don't create an empty chunk if overlap is large and text is short
-        if start >= len(text):
-            break
-            
-    # logger.debug(f"Chunked text into {len(chunks)} chunks. Original length: {len(text)}, chunk_size: {chunk_size}, overlap: {chunk_overlap}")
+        if start >= len(text): break
     return chunks
 
 # --- Pydantic Models for Data Validation ---
-
 class Message(BaseModel):
     role: str
     content: str
-
     @field_validator('role')
     @classmethod
     def role_must_be_known(cls, v: str) -> str:
-        known_roles = {"system", "user", "assistant", "tool_code", "tool_outputs"}
-        if v not in known_roles:
-            raise ValueError(f"Role must be one of {known_roles}, got '{v}'")
+        if v not in {"system", "user", "assistant", "tool_code", "tool_outputs"}:
+            raise ValueError(f"Role must be known, got '{v}'")
         return v
 
-# Base model for input to the pipeline (after trace_id generation)
 class BasePipelineInput(BaseModel):
-    trace_id: str  # Mandatory unique identifier for the trace
-    schema_version: str # Version of the data schema
-    messages: List[Message]
-    completion: str  # This is the target completion for SFT
-
-# Output schema after Step 1: Session Identification (src/step2b_identify_sessions.py)
+    trace_id: str; schema_version: str; messages: List[Message]; completion: str
 class SessionIdentificationOutput(BasePipelineInput):
-    session_id: str
-    turn_in_session_id: int
-
-# Output schema after Step 2: Regex-based Anonymization (src/step1_anonymize_data.py)
+    session_id: str; turn_in_session_id: int
 class RegexAnonymizationOutput(SessionIdentificationOutput):
-    messages: List[Message]  # Content within messages is now potentially anonymized
-    completion: str          # Completion is now potentially anonymized
+    messages: List[Message]; completion: str
     original_messages: Optional[List[Message]] = None
     original_completion: Optional[str] = None
-    anonymization_details: Dict[str, Any] # Details about regex patterns found
-
-# Output schema after Step 3: LLM-based Anonymization (src/step1b_anonymize_llm.py)
+    anonymization_details: Dict[str, Any]
 class LlmAnonymizationOutput(RegexAnonymizationOutput):
-    messages: List[Message]  # Content potentially further anonymized by LLM
-    completion: str          # Completion potentially further anonymized by LLM
-    # original_messages and original_completion are inherited and updated if necessary
-    llm_anonymization_details: Dict[str, Any] # Details about LLM PII detection
-
-# Output schema after Step 4: Heuristic Complexity Scoring (src/step2_score_complexity.py)
+    messages: List[Message]; completion: str
+    llm_anonymization_details: Dict[str, Any]
 class ComplexityScoringOutput(LlmAnonymizationOutput):
-    complexity_score: float
-    complexity_reasoning: str
-    # Optional fields for future LLM-based complexity scoring
+    complexity_score: float; complexity_reasoning: str
     llm_complexity_score: Optional[float] = None
     llm_complexity_rationale: Optional[str] = None
-
-# Output schema after Step 5: Feedback/Correction Pattern Analysis (src/step3_analyze_correction_patterns.py)
-# This can be considered the schema for the final output of the current pipeline.
 class CorrectionAnalysisOutput(ComplexityScoringOutput):
-    is_user_feedback_on_error: bool
-    is_assistant_self_correction: bool
+    is_user_feedback_on_error: bool; is_assistant_self_correction: bool
     is_assistant_error_before_correction: bool
     correction_rationale: Optional[str] = None
-    correction_analysis_details: Dict[str, Any] # Details from LLM analysis of corrections
+    correction_analysis_details: Dict[str, Any]
 
-    # The fields `is_direct_correction` and `correction_similarity_score` from the old BaseTrace
-    # were not found to be populated by current scripts, so they are omitted here.
-    # If they are needed, they can be added back.
+# --- Dataset Feature Schemas ---
+llm_anonymization_output_features = DatasetFeatures({
+    "trace_id": Value("string"), "schema_version": Value("string"),
+    "messages": Sequence(feature=DatasetFeatures({'role': Value('string'), 'content': Value('string')})),
+    "completion": Value("string"), "session_id": Value("string"), "turn_in_session_id": Value("int32"),
+    "original_messages": Sequence(feature=DatasetFeatures({'role': Value('string'), 'content': Value('string')})),
+    "original_completion": Value("string"),
+    "anonymization_details": DatasetFeatures({'regex_patterns_found': Sequence(Value('string')), 'regex_categories_found': Sequence(Value('string'))}),
+    "llm_anonymization_details": DatasetFeatures({
+        'llm_sensitive_categories_found': Sequence(Value('string')),
+        'llm_detected_pii_items_messages': Sequence(feature=DatasetFeatures({'category': Value('string'), 'value': Value('string')})),
+        'llm_detected_pii_items_completion': Sequence(feature=DatasetFeatures({'category': Value('string'), 'value': Value('string')}))
+    })
+})
 
 # --- Pydantic Models for Pipeline Configuration ---
-
-class StepInputConfig(BaseModel):
-    main: str
-
-class StepOutputConfig(BaseModel):
-    main: str
-
+class StepInputConfig(BaseModel): main: str
+class StepOutputConfig(BaseModel): main: str
 class StepConfig(BaseModel):
-    name: str
-    script: str
-    enabled: bool = True
-    inputs: StepInputConfig
-    outputs: StepOutputConfig
-    args: List[Any] = []
-    description: Optional[str] = None
-
+    name: str; script: str; enabled: bool = True
+    inputs: StepInputConfig; outputs: StepOutputConfig
+    args: List[Any] = []; description: Optional[str] = None
 class PipelineConfig(BaseModel):
-    pipeline_name: str
-    default_base_input: str
-    steps: List[StepConfig]
+    pipeline_name: str; default_base_input: str; steps: List[StepConfig]
+
+# --- Validation Function Helper ---
+def _convert_transposed_messages_if_needed(data_dict: Dict[str, Any], field_name: str) -> None:
+    """
+    Checks if data_dict[field_name] is in a transposed format (dict of lists from Hugging Face Datasets)
+    and converts it to a list of dicts (Pydantic Message model format) in place.
+    Handles cases where the field might be None, already a list of dicts, or not present.
+    """
+    if field_name not in data_dict:
+        return
+
+    field_value = data_dict[field_name]
+
+    if isinstance(field_value, dict) and \
+       'role' in field_value and 'content' in field_value and \
+       isinstance(field_value['role'], list) and \
+       isinstance(field_value['content'], list):
+        
+        if len(field_value['role']) != len(field_value['content']):
+            logger.warning(
+                f"Field '{field_name}' in trace_id '{data_dict.get('trace_id', 'N/A')}' "
+                f"appears transposed but 'role' and 'content' lists have different lengths "
+                f"({len(field_value['role'])} vs {len(field_value['content'])}). "
+                f"Skipping conversion for this field. Pydantic validation will likely fail."
+            )
+            return 
+
+        actual_messages_list = []
+        for r, c in zip(field_value['role'], field_value['content']):
+            actual_messages_list.append({'role': r, 'content': c})
+        
+        data_dict[field_name] = actual_messages_list
+        logger.debug(f"Converted transposed field '{field_name}' for trace_id '{data_dict.get('trace_id', 'N/A')}' to list of dicts.")
 
 # --- Validation Function ---
 def validate_dataset(dataset: Union[Dataset, List[Dict]], model: BaseModel, step_name: str) -> Tuple[List[Dict], List[Dict]]:
-    """
-    Validates each example in a Hugging Face Dataset or list of dicts against a Pydantic model.
-    Returns a tuple of (valid_examples, invalid_examples_with_errors).
-    """
-    valid_examples = []
-    invalid_examples_with_errors = []
+    valid_examples = []; invalid_examples_with_errors = []
     
-    # If it's a Hugging Face Dataset, convert to list of dicts for easier iteration
     if isinstance(dataset, Dataset):
         examples_to_validate = [dict(example) for example in dataset]
     elif isinstance(dataset, list) and all(isinstance(item, dict) for item in dataset):
         examples_to_validate = dataset
     else:
-        logger.error(f"[{step_name}] Validation error: Input must be a Hugging Face Dataset or a list of dictionaries.")
-        # Return all as invalid if the type is wrong, or handle as per desired strictness
+        logger.error(f"[{step_name}] Validation error: Input must be a Dataset or list of dicts.")
         return [], [{"example": "Dataset type error", "errors": "Input must be a Dataset or list of dicts"}]
 
-
-    for i, example_dict in enumerate(examples_to_validate):
+    for i, example_dict_original in enumerate(examples_to_validate):
+        example_dict_for_validation = copy.deepcopy(example_dict_original)
         try:
-            # Attempt to parse the dictionary using the Pydantic model
-            model.model_validate(example_dict) # Pydantic v2
-            valid_examples.append(example_dict)
+            _convert_transposed_messages_if_needed(example_dict_for_validation, 'messages')
+            _convert_transposed_messages_if_needed(example_dict_for_validation, 'original_messages')
+            
+            model.model_validate(example_dict_for_validation) 
+            valid_examples.append(example_dict_original) 
         except ValidationError as e:
-            logger.warning(f"[{step_name}] Validation failed for example {i}: {e.errors(include_url=False)}") # Pydantic v2 errors
-            invalid_examples_with_errors.append({"example_index": i, "example_data": example_dict, "errors": e.errors(include_url=False)})
-        except Exception as e_generic: # Catch any other unexpected errors during validation
-            logger.error(f"[{step_name}] Unexpected error validating example {i}: {e_generic}", exc_info=True)
-            invalid_examples_with_errors.append({"example_index": i, "example_data": example_dict, "errors": [{"type": "unexpected_error", "msg": str(e_generic)}]})
+            trace_id_info = example_dict_original.get('trace_id', 'N/A')
+            logger.warning(f"[{step_name}] Validation failed for example {i} (trace_id: {trace_id_info}): {e.errors(include_url=False)}")
+            
+            messages_data = example_dict_for_validation.get('messages', 'Field not present')
+            original_messages_data = example_dict_for_validation.get('original_messages', 'Field not present')
+            
+            try: messages_debug_str = json.dumps(messages_data, indent=2) if not isinstance(messages_data, str) else messages_data
+            except TypeError: messages_debug_str = str(messages_data)
+            try: original_messages_debug_str = json.dumps(original_messages_data, indent=2) if not isinstance(original_messages_data, str) else original_messages_data
+            except TypeError: original_messages_debug_str = str(original_messages_data)
 
+            logger.debug(f"Data for 'messages' field passed to Pydantic (trace_id: {trace_id_info}): {messages_debug_str}")
+            logger.debug(f"Data for 'original_messages' field passed to Pydantic (trace_id: {trace_id_info}): {original_messages_debug_str}")
+            
+            invalid_examples_with_errors.append({"example_index": i, "example_data": example_dict_original, "errors": e.errors(include_url=False)})
+        except Exception as e_generic: 
+            logger.error(f"[{step_name}] Unexpected error validating example {i} (trace_id: {example_dict_original.get('trace_id', 'N/A')}): {e_generic}", exc_info=True)
+            invalid_examples_with_errors.append({"example_index": i, "example_data": example_dict_original, "errors": [{"type": "unexpected_error", "msg": str(e_generic)}]})
 
     if invalid_examples_with_errors:
         logger.warning(f"[{step_name}] Validation summary: {len(valid_examples)} valid, {len(invalid_examples_with_errors)} invalid examples.")
@@ -444,25 +390,13 @@ def validate_dataset(dataset: Union[Dataset, List[Dict]], model: BaseModel, step
 
 
 def ensure_dir_exists(dir_path: str):
-    """Ensures that a directory exists, creating it if necessary."""
-    if not dir_path:
-        return # Do nothing if path is empty or None
-
+    if not dir_path: return
     if os.path.exists(dir_path):
         if not os.path.isdir(dir_path):
-            err_msg = f"Path exists but is not a directory: {dir_path}"
-            logger.error(err_msg)
-            raise FileExistsError(err_msg) # More specific error
-        # Path exists and is a directory, do nothing further
+            err_msg = f"Path exists but is not a directory: {dir_path}"; logger.error(err_msg); raise FileExistsError(err_msg)
         return
-    
-    # Path does not exist, try to create it
-    try:
-        os.makedirs(dir_path, exist_ok=True) # exist_ok=True is good for multi-level creation
-        logger.info(f"Created directory: {dir_path}")
-    except OSError as e: # Catches FileExistsError if a component of path is a file during makedirs
-        logger.error(f"Error creating directory {dir_path}: {e}", exc_info=True)
-        raise # Re-raise to signal failure
+    try: os.makedirs(dir_path, exist_ok=True); logger.info(f"Created directory: {dir_path}")
+    except OSError as e: logger.error(f"Error creating directory {dir_path}: {e}", exc_info=True); raise 
 
 # Example usage (can be removed or kept for testing)
 if __name__ == '__main__':

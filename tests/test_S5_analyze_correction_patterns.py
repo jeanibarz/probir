@@ -4,10 +4,9 @@ import json
 import logging
 from unittest.mock import patch, MagicMock
 
-from datasets import Dataset
-from src.step3_analyze_correction_patterns import main as step3_main
-from src.common_utils import BasePipelineInput # Changed from BaseTrace
-from src.step3_analyze_correction_patterns import CorrectionPatterns # Import for mock responses
+from step3_analyze_correction_patterns import main as step3_main
+from common_utils import BasePipelineInput # Changed from BaseTrace
+from step3_analyze_correction_patterns import CorrectionPatterns # Import for mock responses
 
 TEST_OUTPUT_DIR = "tests/test_outputs/step3_analyze_correction_patterns"
 TEST_LOG_DIR = "logs"
@@ -430,7 +429,7 @@ def test_analyze_corrections_limit_argument(mock_ollama_client_cls, caplog):
     assert len(output_data) == limit_value
     assert mock_client_instance.chat.call_count == limit_value
     # Updated log message check based on common_utils.load_jsonl_dataset changes
-    expected_log_msg_part = f"Returning {limit_value} examples (limited to {limit_value} from {len(input_data)} total, loaded via Dataset.from_json)"
+    expected_log_msg_part = f"Returning {limit_value} examples (limited from {len(input_data)}, loaded via Dataset.from_json (schema inference))"
     found_log = False
     for record in caplog.records: # Iterate through actual log records
         if record.levelname == "INFO" and expected_log_msg_part in record.message and f"from {input_file}" in record.message:

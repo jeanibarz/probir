@@ -758,7 +758,7 @@ steps:
     
     # The relevant log message is about the *output* of ProcessEmptyStep being empty during validation
     output_empty_step_file_path = Path(env["pipeline_output_dir"]) / "output_empty_step.jsonl"
-    expected_log_message = f"Input file {output_empty_step_file_path.as_posix()} is empty (checked with os.path.getsize). Returning an empty dataset."
+    expected_log_message = f"Input file {output_empty_step_file_path.as_posix()} is empty. Returning an empty dataset." # Actual log
     assert expected_log_message in log_content
     assert "Step 'ProcessEmptyStep' completed successfully." in log_content
     

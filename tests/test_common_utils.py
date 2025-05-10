@@ -377,7 +377,7 @@ def test_load_jsonl_dataset_with_limit(mock_logger):
     assert len(dataset) == limit
     assert dataset[0]["id"] == SAMPLE_DATA[0]["id"]
     # Updated log message check
-    expected_log_msg_part = f"Returning {limit} examples (limited to {limit} from {len(SAMPLE_DATA)} total, loaded via Dataset.from_json)"
+    expected_log_msg_part = f"Returning {limit} examples (limited from {len(SAMPLE_DATA)}, loaded via Dataset.from_json (schema inference))" # Actual log
     found_log = False
     for call in mock_logger.info.call_args_list:
         if expected_log_msg_part in call[0][0] and f"from {file_path}" in call[0][0]:
@@ -390,7 +390,7 @@ def test_load_jsonl_dataset_file_not_found(mock_logger):
     file_path = os.path.join(TEST_DIR_ROOT, "non_existent.jsonl")
     with pytest.raises(FileNotFoundError):
         load_jsonl_dataset(file_path)
-    mock_logger.error.assert_called_with(f"Input file not found: {file_path} (checked with os.path.exists before any loading attempt)")
+    mock_logger.error.assert_called_with(f"Input file not found: {file_path}") # Actual log
 
 @patch('common_utils.logger')
 def test_load_jsonl_dataset_empty_file(mock_logger):
@@ -404,7 +404,7 @@ def test_load_jsonl_dataset_empty_file(mock_logger):
     
     assert isinstance(dataset, Dataset)
     assert len(dataset) == 0
-    mock_logger.warning.assert_called_with(f"Input file {file_path} is empty (checked with os.path.getsize). Returning an empty dataset.")
+    mock_logger.warning.assert_called_with(f"Input file {file_path} is empty. Returning an empty dataset.") # Actual log
     mock_logger.error.assert_not_called() # Ensure no error is logged for this case
 
 
@@ -766,7 +766,7 @@ def test_validate_dataset_invalid_input_type(mock_logger):
     assert len(valid_examples) == 0
     assert len(invalid_examples) == 1
     assert invalid_examples[0]["errors"] == "Input must be a Dataset or list of dicts"
-    mock_logger.error.assert_called_with("[TestStepInvalidType] Validation error: Input must be a Hugging Face Dataset or a list of dictionaries.")
+    mock_logger.error.assert_called_with("[TestStepInvalidType] Validation error: Input must be a Dataset or list of dicts.") # Actual log
 
 @patch('common_utils.BaseModel.model_validate') # Mock the actual validation call
 @patch('common_utils.logger')
@@ -782,5 +782,5 @@ def test_validate_dataset_unexpected_error_during_validation(mock_logger, mock_m
     assert invalid_examples[0]["example_index"] == 0
     assert invalid_examples[0]["errors"][0]["type"] == "unexpected_error"
     assert invalid_examples[0]["errors"][0]["msg"] == "Unexpected boom!"
-    mock_logger.error.assert_called_with("[TestStepUnexpected] Unexpected error validating example 0: Unexpected boom!", exc_info=True)
+    mock_logger.error.assert_called_with("[TestStepUnexpected] Unexpected error validating example 0 (trace_id: trace_v1): Unexpected boom!", exc_info=True) # Actual log
     mock_logger.warning.assert_called_with("[TestStepUnexpected] Validation summary: 0 valid, 1 invalid examples.")

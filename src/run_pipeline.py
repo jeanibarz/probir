@@ -25,7 +25,9 @@ from common_utils import (
     LlmAnonymizationOutput,
     ComplexityScoringOutput,
     CorrectionAnalysisOutput,
-    Message # Message is used by the models
+    Message, # Message is used by the models
+    # Import the Features object for step1c output
+    llm_anonymization_output_features
 )
 
 # Logger will be configured by setup_logging in main
@@ -158,10 +160,18 @@ def run_pipeline(config_path="pipeline.yaml", steps_to_run_arg=None, resume=Fals
     STEP_SCRIPT_TO_OUTPUT_MODEL: Dict[str, Type[BaseModel]] = {
         "src/step2b_identify_sessions.py": SessionIdentificationOutput,
         "src/step1_anonymize_data.py": RegexAnonymizationOutput,
-        "src/step1b_anonymize_llm.py": LlmAnonymizationOutput,
+        "src/step1b_anonymize_llm.py": LlmAnonymizationOutput, # Keep for old pipeline.yaml compatibility if needed
+        "src/step1c_session_aware_llm_anonymize.py": LlmAnonymizationOutput, # New script uses same output model
         "src/step2_score_complexity.py": ComplexityScoringOutput,
         "src/step3_analyze_correction_patterns.py": CorrectionAnalysisOutput,
         "tests/test_helpers/dummy_step.py": BasePipelineInput, # Added for test helper script
+    }
+
+    # --- Define mapping from step script to its DatasetFeatures object ---
+    # This allows explicit schema definition when loading step outputs for validation.
+    STEP_SCRIPT_TO_FEATURES: Dict[str, Any] = { # Using Any for DatasetFeatures type from datasets
+        "src/step1c_session_aware_llm_anonymize.py": llm_anonymization_output_features,
+        # Add other steps here if they have predefined Features objects
     }
 
     # --- Checkpoint and Resume Logic ---
@@ -374,9 +384,6 @@ def run_pipeline(config_path="pipeline.yaml", steps_to_run_arg=None, resume=Fals
             if os.path.exists(actual_output_file):
                 logger.info(f"Validating output of step '{step_name}' from file: {actual_output_file}")
                 try:
-                    # Load the dataset produced by the step
-                    produced_dataset = load_jsonl_dataset(actual_output_file)
-                    
                     # Determine the correct Pydantic model for this step's output
                     # Dynamically determine project root (assuming this script is in src/)
                     PROJECT_ROOT_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -390,6 +397,15 @@ def run_pipeline(config_path="pipeline.yaml", steps_to_run_arg=None, resume=Fals
                         # (The map would need to contain this absolute path if such a script is used)
                     
                     output_model_for_step = STEP_SCRIPT_TO_OUTPUT_MODEL.get(script_lookup_key)
+                    step_specific_features = STEP_SCRIPT_TO_FEATURES.get(script_lookup_key)
+
+                    if step_specific_features:
+                        logger.info(f"Using explicit features for loading output of step '{step_name}'.")
+                    else:
+                        logger.info(f"No explicit features defined for step '{step_name}', will use schema inference for loading.")
+                    
+                    # Load the dataset produced by the step, using explicit features if available
+                    produced_dataset = load_jsonl_dataset(actual_output_file, features=step_specific_features)
                     
                     if not output_model_for_step:
                         logger.error(f"No output Pydantic model defined for script '{script}' (lookup key: '{script_lookup_key}') in STEP_SCRIPT_TO_OUTPUT_MODEL map. Cannot validate step '{step_name}'.")

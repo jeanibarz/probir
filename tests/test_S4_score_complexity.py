@@ -4,9 +4,8 @@ import json
 import logging
 from unittest.mock import patch, mock_open
 
-from datasets import Dataset
-from src.step2_score_complexity import main as step2_main
-from src.common_utils import BasePipelineInput # For creating valid test data
+from step2_score_complexity import main as step2_main
+from common_utils import BasePipelineInput # For creating valid test data
 
 # Define a root directory for test outputs to make cleanup easier
 TEST_OUTPUT_DIR = "tests/test_outputs/step2_score_complexity"

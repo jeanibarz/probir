@@ -1,5 +1,6 @@
 import json # Still needed for json.dumps in debug log
 import logging
+from collections import defaultdict # Added for grouping
 from tqdm import tqdm # Keep tqdm for progress if iterating over a list
 from datasets import Dataset # To create Dataset from list
 from common_utils import (
@@ -157,21 +158,46 @@ def main():
             logger.error(f"An unexpected error occurred during processing: {e}", exc_info=True)
             debug_file.write(f"FATAL ERROR: {e}\n")
 
-    logger.info(f"Session identification complete. Processed {processed_lines} examples.")
-    # Removed total_lines comparison as it's not directly comparable with dataset iteration easily
-    logger.info(f"Total sessions identified: {current_session_id}")
+    logger.info(f"Session identification complete. Processed {processed_lines} examples from input.")
+    logger.info(f"Total unique session IDs identified before filtering: {current_session_id}")
 
-    if not processed_examples:
-        logger.warning("No examples were processed successfully. Output file will be empty or not created if saving fails.")
+    # Filter to keep only the trace with the most messages per session
+    if processed_examples:
+        logger.info(f"Filtering {len(processed_examples)} traces to keep the longest trace per session...")
+        sessions_grouped = defaultdict(list)
+        for ex in processed_examples:
+            sessions_grouped[ex["session_id"]].append(ex)
+
+        final_examples_to_save = []
+        for session_id, traces_in_session in sessions_grouped.items():
+            if not traces_in_session:
+                continue
+            
+            longest_trace = traces_in_session[0]
+            max_messages = len(longest_trace.get("messages", []))
+            
+            for trace in traces_in_session[1:]:
+                num_messages = len(trace.get("messages", []))
+                if num_messages > max_messages:
+                    max_messages = num_messages
+                    longest_trace = trace
+            final_examples_to_save.append(longest_trace)
+        
+        logger.info(f"After filtering, {len(final_examples_to_save)} traces remain (one per session).")
+    else:
+        final_examples_to_save = [] # Ensure it's defined
+
+    if not final_examples_to_save:
+        logger.warning("No examples were processed successfully or survived filtering. Output file will be empty.")
         # Create an empty dataset to ensure the output file is created as per pipeline expectations
         output_dataset = Dataset.from_list([])
     else:
-        # Create Hugging Face Dataset from processed examples
+        # Create Hugging Face Dataset from filtered examples
         try:
-            output_dataset = Dataset.from_list(processed_examples)
-            logger.info(f"Successfully created output dataset with {len(output_dataset)} examples.")
+            output_dataset = Dataset.from_list(final_examples_to_save)
+            logger.info(f"Successfully created output dataset with {len(output_dataset)} examples (after filtering).")
         except Exception as e:
-            logger.error(f"Failed to create Hugging Face Dataset from processed examples: {e}", exc_info=True)
+            logger.error(f"Failed to create Hugging Face Dataset from filtered examples: {e}", exc_info=True)
             return # Exit if dataset creation fails
 
     # Output validation is now handled by the pipeline orchestrator (run_pipeline.py)

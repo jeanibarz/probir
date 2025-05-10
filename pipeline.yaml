@@ -13,7 +13,7 @@ steps:
       main: "{base}"
     outputs:
       main: "data/sft_dataset_S1_sessionized.jsonl" # S1 for Step 1 in new order
-    args: ["--limit", "13"]
+    args: ["--limit", "130"]
     description: "Adds session_id and turn_in_session_id to traces."
 
   - name: "2. Regex-based Anonymization"
@@ -23,18 +23,18 @@ steps:
       main: "{prev_output}"
     outputs:
       main: "data/sft_dataset_S2_anonymized_regex.jsonl"
-    args: ["--limit", "13"]
+    args: ["--limit", "130"]
     description: "Applies regex-based anonymization."
 
-  - name: "3. LLM-based Anonymization"
-    script: "src/step1b_anonymize_llm.py"
+  - name: "3. Session-Aware LLM-based Anonymization"
+    script: "src/step1c_session_aware_llm_anonymize.py"
     enabled: true
     inputs:
       main: "{prev_output}"
     outputs:
-      main: "data/sft_dataset_S3_anonymized_llm.jsonl"
-    args: ["--limit", "13", "--chunk_size", "10000", "--chunk_overlap", "1000", "--max_workers", "10", "--ollama_model", "myaniu/qwen2.5-1m:7b", "--ollama_host", "http://10.0.2.2:11434"]
-    description: "Applies LLM-based PII detection and anonymization."
+      main: "data/sft_dataset_S3_anonymized_llm_session_aware.jsonl" # Updated output filename
+    args: ["--limit", "130", "--chunk_size", "10000", "--chunk_overlap", "1000", "--max_workers", "10", "--ollama_model", "myaniu/qwen2.5-1m:7b", "--ollama_host", "http://10.0.2.2:11434"]
+    description: "Applies session-aware LLM-based PII detection and anonymization."
 
   - name: "4. Heuristic Complexity Scoring"
     script: "src/step2_score_complexity.py"

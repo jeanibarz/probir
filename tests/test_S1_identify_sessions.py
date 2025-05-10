@@ -58,16 +58,32 @@ SAMPLE_INPUT_DATA = [
 # The script assigns session_id (uuid4) and turn_in_session_id
 # Since session_id is random, we can't hardcode it.
 # We will check for presence of session_id, turn_in_session_id, and their correct sequencing.
-# For this test, we'll focus on the turn_in_session_id logic and that session_ids change when expected.
+# The script now outputs only the longest trace from each session.
+# We expect 3 sessions from the sample data.
+# Session 1: trace1, trace2 -> trace2 is longest (messages: 3)
+# Session 2: trace3 -> trace3 is longest (messages: 1)
+# Session 3: trace4, trace5 -> trace5 is longest (messages: 3)
 
-EXPECTED_TURN_LOGIC = [
-    {"trace_id": "trace1", "turn_in_session_id": 1}, # New session (1-indexed)
-    {"trace_id": "trace2", "turn_in_session_id": 2}, # Continues session
-    {"trace_id": "trace3", "turn_in_session_id": 1}, # New session
-    {"trace_id": "trace4", "turn_in_session_id": 1}, # New session
-    {"trace_id": "trace5", "turn_in_session_id": 2}  # Continues session
+EXPECTED_OUTPUT_CONTENT = [
+    {
+        "trace_id": "trace2", 
+        "expected_session_id": "session_001", # First session identified
+        "expected_turn_in_session_id": 2,
+        "expected_messages_length": 3
+    },
+    {
+        "trace_id": "trace3",
+        "expected_session_id": "session_002", # Second session
+        "expected_turn_in_session_id": 1,
+        "expected_messages_length": 1
+    },
+    {
+        "trace_id": "trace5",
+        "expected_session_id": "session_003", # Third session
+        "expected_turn_in_session_id": 2,
+        "expected_messages_length": 3
+    }
 ]
-
 
 @pytest.fixture(scope="module", autouse=True)
 def create_test_data_files():
@@ -121,38 +137,36 @@ def test_identify_sessions():
         for line in f:
             actual_data.append(json.loads(line))
     
-    assert len(actual_data) == len(SAMPLE_INPUT_DATA), \
-        f"Number of records in output ({len(actual_data)}) does not match input ({len(SAMPLE_INPUT_DATA)})"
+    assert len(actual_data) == len(EXPECTED_OUTPUT_CONTENT), \
+        f"Number of records in output ({len(actual_data)}) does not match expected ({len(EXPECTED_OUTPUT_CONTENT)})"
 
-    # Verify session_id and turn_in_session_id logic
-    # We check that session_id is present and turn_in_session_id matches expected logic.
-    # We also check that session_id changes when a new session is expected.
+    # Verify the content of the output records
+    # The order of records in actual_data should match the order of sessions identified
     
-    previous_session_id = None
-    expected_session_index_change = [False, False, True, True, False] # True if session_id should change from previous
+    actual_data_map_by_trace_id = {item["trace_id"]: item for item in actual_data}
 
-    for i, actual_item in enumerate(actual_data):
-        expected_item_logic = next(t for t in EXPECTED_TURN_LOGIC if t["trace_id"] == actual_item["trace_id"])
+    for expected_item in EXPECTED_OUTPUT_CONTENT:
+        actual_item = actual_data_map_by_trace_id.get(expected_item["trace_id"])
+        assert actual_item is not None, f"Expected trace_id {expected_item['trace_id']} not found in output."
 
-        assert "session_id" in actual_item, f"session_id missing in output item {i}: {actual_item}"
-        assert isinstance(actual_item["session_id"], str), f"session_id is not a string in item {i}"
-        assert len(actual_item["session_id"]) > 0, f"session_id is empty in item {i}"
+        assert "session_id" in actual_item, f"session_id missing for trace_id {expected_item['trace_id']}"
+        assert actual_item["session_id"] == expected_item["expected_session_id"], \
+            f"Mismatch in session_id for trace_id {expected_item['trace_id']}. Expected {expected_item['expected_session_id']}, got {actual_item['session_id']}"
         
-        assert "turn_in_session_id" in actual_item, f"turn_in_session_id missing in output item {i}"
-        assert actual_item["turn_in_session_id"] == expected_item_logic["turn_in_session_id"], \
-            f"Mismatch in turn_in_session_id for trace_id {actual_item['trace_id']}. Expected {expected_item_logic['turn_in_session_id']}, got {actual_item['turn_in_session_id']}"
+        assert "turn_in_session_id" in actual_item, f"turn_in_session_id missing for trace_id {expected_item['trace_id']}"
+        assert actual_item["turn_in_session_id"] == expected_item["expected_turn_in_session_id"], \
+            f"Mismatch in turn_in_session_id for trace_id {expected_item['trace_id']}. Expected {expected_item['expected_turn_in_session_id']}, got {actual_item['turn_in_session_id']}"
 
-        if i > 0:
-            if expected_session_index_change[i]:
-                assert actual_item["session_id"] != previous_session_id, \
-                    f"session_id should have changed for trace_id {actual_item['trace_id']} (item {i}), but it remained {actual_item['session_id']}"
-            else:
-                assert actual_item["session_id"] == previous_session_id, \
-                    f"session_id should NOT have changed for trace_id {actual_item['trace_id']} (item {i}), but it changed from {previous_session_id} to {actual_item['session_id']}"
-        
-        previous_session_id = actual_item["session_id"]
+        assert "messages" in actual_item, f"messages field missing for trace_id {expected_item['trace_id']}"
+        assert len(actual_item["messages"]) == expected_item["expected_messages_length"], \
+            f"Mismatch in messages length for trace_id {expected_item['trace_id']}. Expected {expected_item['expected_messages_length']}, got {len(actual_item['messages'])}"
 
     # Further check: count distinct session_ids. Expected 3 sessions.
     distinct_session_ids = set(item["session_id"] for item in actual_data)
     assert len(distinct_session_ids) == 3, \
         f"Expected 3 distinct session_ids, but found {len(distinct_session_ids)}: {distinct_session_ids}"
+    
+    # Check that the session IDs found are the ones we expect
+    expected_session_id_set = set(e["expected_session_id"] for e in EXPECTED_OUTPUT_CONTENT)
+    assert distinct_session_ids == expected_session_id_set, \
+        f"Distinct session IDs found ({distinct_session_ids}) do not match expected set ({expected_session_id_set})"

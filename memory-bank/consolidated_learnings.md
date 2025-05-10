@@ -12,6 +12,22 @@ This document contains curated, summarized, and actionable insights derived from
 - When using type hints from the `typing` module (e.g., `List`, `Tuple`, `Dict`, `Optional`, `Any`), ensure they are explicitly imported: `from typing import List, Tuple, Dict, Optional, Any`.
 - *Rationale:* Failure to import these types will result in a `NameError` at runtime (or potentially static analysis time) when the type hint is evaluated. This is a common oversight when adding or modifying type annotations.
 
+**Pattern: Hierarchical Configuration Loading**
+- Implement a clear precedence for loading configuration values, e.g., Command-Line Arguments > Environment Variables > `.env` file values > Hardcoded defaults.
+- A helper function (e.g., `load_config_value(var_name, cli_value, default_value)`) can encapsulate this logic.
+- *Rationale:* Provides flexibility for users to override configurations at different levels and centralizes config resolution.
+
+**Pattern: File Name Sanitization**
+- When generating filenames from user-configurable strings (like step names from a pipeline config), ensure all potentially problematic characters (e.g., `/`, `\`, `:`, `*`, `?`, `"`, `<`, `>`, `|`) are replaced or removed to create valid filenames and prevent unintended directory structures.
+- *Rationale:* Avoids `FileNotFoundError` or incorrect file placement due to invalid characters in paths.
+
+**Pattern: Grouping and Selecting by Max Criterion**
+- To group a list of items (e.g., dictionaries) by a common key and then select one item from each group based on a maximum value of some attribute:
+    1. Use `collections.defaultdict(list)` to group items by the key.
+    2. Iterate through the `items()` of the `defaultdict`.
+    3. For each group (list of items), iterate through its members to find the one with the maximum value for the desired attribute (e.g., `len(item.get("messages", []))`).
+- *Rationale:* Common pattern for summarizing or selecting representative items from grouped data.
+
 ## Project `probir` Specifics
 
 **Project Structure Overview:**
@@ -26,7 +42,76 @@ This document contains curated, summarized, and actionable insights derived from
 - Standardize on using `pyproject.toml` for defining project metadata and dependencies.
 - Use `uv pip install .` for installing and managing these dependencies.
 
-## SFT Data Preparation & Hugging Face
+## Data Processing & Pipelines
+
+**Pattern: Session-Aware Processing for Sequential Data**
+- For sequential data grouped by sessions (e.g., conversations):
+    1. Group data by a session identifier.
+    2. Identify or construct a canonical or most complete state for each session (e.g., the latest turn, or all unique messages within the session).
+    3. Perform intensive analysis (like LLM calls for PII detection) on this canonical state to build a session-wide understanding or map (e.g., a PII map).
+    4. Apply transformations or enrichments (e.g., anonymization) consistently to all individual data points (turns) within the session using this session-wide map.
+- *Rationale:* Improves consistency of processing across a session and can reduce redundant computations (e.g., by not re-analyzing identical historical messages multiple times).
+
+**Pattern: Pipeline Orchestration - Integrating New Steps**
+- When adding new processing scripts to a data pipeline:
+    1. Create the new script with well-defined input/output contracts (e.g., expected data schema).
+    2. Update the pipeline configuration file (e.g., `pipeline.yaml`) to define the new step, including its script path, input sources (e.g., `{{base}}`, `{{prev_output}}`), output destinations, and any specific arguments.
+    3. If the orchestrator uses internal mappings for script-specific logic (e.g., Pydantic models for output validation, `datasets.Features` for loading), update these mappings to include the new script.
+- *Rationale:* Ensures new steps are correctly integrated, validated, and their data lineage is maintained.
+
+**Pattern: Orchestrator-Managed IDs and Metadata**
+- Common metadata like unique trace IDs (e.g., UUIDs) and schema versions should be generated and injected by the pipeline orchestrator at the beginning of processing, rather than by individual steps.
+- *Rationale:* Ensures consistency and traceability of data records across all pipeline stages.
+
+**Pattern: Simplifying Downstream "Session-Aware" Logic**
+- When an upstream pipeline step changes to guarantee a simpler data structure (e.g., one item per session instead of multiple), downstream scripts designed for the more complex structure (e.g., "session-aware" logic) should be reviewed and simplified. This often involves removing aggregation or context-building logic that is no longer necessary (e.g., removing explicit session grouping if each input item already represents a unique session).
+- *Rationale:* Keeps code aligned with data reality, reduces complexity, and improves maintainability.
+
+## Pydantic & Schema Management
+
+**Pattern: Pydantic for Complex Configuration Files**
+- Use Pydantic models to define the expected structure and types for complex configuration files (e.g., `pipeline.yaml`).
+- Load the raw configuration (e.g., from YAML) and then validate it using `YourConfigModel.model_validate()`.
+- Access configuration values via model attributes (e.g., `config.pipeline_name`) rather than dictionary keys.
+- *Rationale:* Improves robustness by providing early validation of configuration structure and types, and makes config access cleaner and type-safe.
+
+**Pattern: Pydantic Schema Evolution with Inheritance**
+- For multi-step data pipelines where the data schema evolves, use Pydantic model inheritance.
+- Define a base model (e.g., `BasePipelineInput`) with common fields. Each subsequent step's output schema can inherit from the previous step's output model, adding or modifying fields as necessary.
+- Example: `BaseInput` -> `Step1Output(BaseInput)` -> `Step2Output(Step1Output)`.
+- *Rationale:* Provides clarity, type safety, and a structured way to manage evolving data schemas.
+
+**Pattern: Robust Script Output with Pydantic Validation**
+- Pipeline scripts should ideally validate their own output records against their declared Pydantic output schema before saving.
+- Serialize only the schema-defined fields, for example, by using `Model.model_validate(record).model_dump(mode='json')`.
+- *Rationale:* Prevents "extra" fields or fields with inconsistent types from propagating, reducing errors in downstream steps or data loading processes. Makes the pipeline more robust to unexpected data variations.
+
+**Pattern: Step-Specific Validation in Orchestrator**
+- The pipeline orchestrator should use step-specific Pydantic models (and/or `datasets.Features`) to validate the output of each pipeline step.
+- Maintain a mapping in the orchestrator from step identifiers (e.g., script paths) to their corresponding Pydantic output models or `datasets.Features` objects.
+- *Rationale:* Ensures stricter adherence to the expected data contract at each stage of the pipeline.
+
+## Hugging Face `datasets` Library
+
+**Pattern: Schema Consistency for `Dataset.from_json()` / `load_dataset("json", ...)`**
+- When loading JSONL files, `datasets` infers the schema. If a field is present in some records but missing (or `null`) in others, it can lead to `TypeError: Couldn't cast array of type <type_found_first> to null` or similar errors.
+- **Mitigation 1 (Data Preparation):** Ensure all fields defined in an expected schema (e.g., a Pydantic model) are present in every record's dictionary before saving to JSONL. Use `None` for optional fields that are not applicable, or empty strings (`""`) for string fields that might otherwise be `None` if the schema expects non-nullable strings.
+- **Mitigation 2 (Explicit Features):** If schema inference problems persist, providing an explicit `features` argument (a `datasets.Features` object) to `load_dataset("json", data_files=..., features=...)` or `Dataset.from_list(..., features=...)` is the most reliable way to ensure correct data loading.
+- *Rationale:* Aids schema inference and prevents type casting errors during dataset loading.
+
+**Pattern: Handling Transposed Structures from `Dataset` Iteration**
+- When iterating a Hugging Face `Dataset` object (e.g., `[dict(example) for example in dataset]`), fields that are lists of nested objects (structs in Arrow terms) can be yielded in a "transposed" format.
+    - Example: A Pydantic field `messages: List[MessageObject]` (where `MessageObject` is `{'role': str, 'content': str}`) might appear in the iterated dictionary as `messages: {'role': List[str], 'content': List[str]}`.
+- If subsequent validation (e.g., with Pydantic) expects the `List[MessageObject]` format, a pre-validation data transformation step is necessary to convert the transposed structure back.
+- *Rationale:* Ensures data conforms to the expected schema before validation, preventing unexpected `ValidationError`s.
+
+**Pattern: Robust Data Loading with Fallbacks**
+- For critical data loading steps using `datasets.load_dataset` or `Dataset.from_json`, if the primary library-based method proves brittle for certain inputs or schemas (e.g., raising `ArrowNotImplementedError` or other hard-to-debug errors even with explicit features):
+    - Consider implementing a simpler, more direct manual parsing fallback (e.g., line-by-line JSONL reading into a list of dicts, then `Dataset.from_list(records, features=...)`).
+    - This fallback should still handle edge cases (empty files, malformed lines) and respect any provided explicit `features`.
+- *Rationale:* Improves overall pipeline resilience by providing an alternative data ingestion path when library internals encounter issues.
+
+## SFT Data Preparation (General)
 
 **SFT Data Formatting (Conversational):**
 - For flexibility with Hugging Face chat templates and the `trl` library, structure conversational data with:
@@ -88,6 +173,8 @@ This document contains curated, summarized, and actionable insights derived from
 
 **Task Interpretation & Adaptation:**
 - Be prepared to adjust the interpretation of a task's sub-goals or initial assumptions if intermediate results suggest a different understanding or approach is needed. For example, a task initially framed as "fix failing logic" might evolve into "verify corrected logic" if an early fix appears successful.
+- Actively seek and prioritize precise user feedback, especially when task requirements seem ambiguous or when feedback indicates a misinterpretation of scope or targets. This can prevent significant rework on incorrect assumptions.
+- *Rationale (for user feedback):* Ensures development efforts are correctly aligned with user needs and priorities, improving efficiency.
 
 **Task Management for Multi-Step Processes:**
 - Using a dedicated file (e.g., `task_progress.md`) to document a multi-phase plan, methodology, and track progress is effective, especially for complex or evolving tasks. This file can be updated as phases are completed or plans change.
@@ -157,6 +244,16 @@ This document contains curated, summarized, and actionable insights derived from
     3. Combine the existing content and the new entry.
     4. Use `write_to_file` with the *full combined content* to update the log file.
 
+**Pattern: Adaptive Strategies for Tool Limitations**
+- When a tool encounters a limitation (e.g., `read_file` failing due to file size):
+    1.  **Inform User:** Clearly communicate the limitation.
+    2.  **Propose Alternatives:** Suggest workaround strategies, such as:
+        *   Breaking down the operation into smaller parts (e.g., diffing individual files if a combined diff is too large).
+        *   Using alternative information sources (e.g., `git status`, prior task context, partial views of data).
+        *   Changing the immediate goal if direct processing is infeasible (e.g., summarizing information instead of displaying it raw).
+    3.  **Adapt to Feedback:** Be prepared to adjust the plan based on user preferences or new instructions arising from the limitation.
+- *Rationale:* Ensures task progression despite tool constraints by leveraging alternative methods and maintaining user collaboration.
+
 ## Testing & Pytest
 
 **Pattern: Pytest Setup for `src/` Layout**
@@ -167,18 +264,19 @@ This document contains curated, summarized, and actionable insights derived from
     4.  Run `pytest` using `python -m pytest`. This ensures `pytest` runs within the context of the project's Python environment, where all dependencies are correctly installed and paths are set up.
 - *Rationale:* Addresses common `ModuleNotFoundError` issues when testing projects with a `src/` layout by ensuring `pytest` can find the source modules and their dependencies.
 
-**Pattern: Testing `logging.FileHandler` Mocking**
-- When mocking `logging.FileHandler` (or its methods like `setLevel`) for tests:
-    - The `logging` framework internally checks `record.levelno >= handler.level`. The `handler.level` attribute must be an integer.
-    - If `FileHandler.setLevel` is mocked, ensure the mock handler instance's `level` attribute is also set to an integer value. This can be done using a `side_effect` on the `setLevel` mock that updates `mock_instance.level`.
-    - *Example `side_effect` for a mock `FileHandler` instance:*
-      ```python
-      def set_level_side_effect(level_value):
-          mock_handler_instance.level = level_value # mock_handler_instance is the mocked FileHandler
-          # Call original setLevel if needed, or just set the attribute
-      mock_handler_instance.setLevel.side_effect = set_level_side_effect
-      ```
-- *Rationale:* Prevents `TypeError` during logging operations in tests due to incompatible types for handler levels.
+**Pattern: Testing with Mocked Classes (e.g., `logging.FileHandler`)**
+- When a class attribute on a module (e.g., `logging.FileHandler`) is patched using `@patch('module.Class')`, the name `Class` within the global `module` object (which is a singleton) resolves to the `MagicMock` object representing the class, not the original type.
+- Using `isinstance(obj, module.Class)` in code under test will then result in `TypeError: isinstance() arg 2 must be a type...` because the mock object is an instance, not a type.
+- **Robust Check:** Instead of `isinstance(obj, PatchedClass)`, use `obj.__class__.__name__ == 'ClassName'` (e.g., `h.__class__.__name__ == 'FileHandler'`) if you need to check the type of a handler `h` when `logging.FileHandler` might be mocked. Also, check for expected attributes (e.g., `hasattr(h, 'baseFilename')`) before accessing them.
+- **Mock Instance Level Attribute (for `FileHandler.level`):** The `logging` framework internally checks `record.levelno >= handler.level`. The `handler.level` attribute must be an integer. If `FileHandler.setLevel` is mocked, ensure the mock handler instance's `level` attribute is also set to an integer value. This can be done using a `side_effect` on the `setLevel` mock that updates `mock_instance.level`.
+    ```python
+    # In test setup:
+    # file_handler_instance = mock_file_handler_cls.return_value # mock_file_handler_cls is @patch('...FileHandler')
+    # def mock_set_level_side_effect(level_val):
+    #     file_handler_instance.level = level_val
+    # file_handler_instance.setLevel.side_effect = mock_set_level_side_effect
+    ```
+- *Rationale:* Prevents `TypeError`s during testing with mocked classes and ensures correct behavior of mocked logging handlers.
 
 **Pattern: Robust Log Assertions**
 - When asserting log messages, especially those containing complex data structures (e.g., Pydantic error dicts, sets, or long strings):
@@ -186,7 +284,7 @@ This document contains curated, summarized, and actionable insights derived from
     - Prefer checking for the presence of key substrings within the logged message.
     - If logged data is structured (e.g., JSON within the log), consider deserializing it and asserting against the structure or specific values.
     - Use `caplog.text` for a single string of all logs, or iterate `caplog.records` (or `mock_logger.method.call_args_list`) for more granular checks.
-- *Rationale:* Makes tests less prone to failures from trivial log message variations, focusing on the essential content.
+- *Rationale:* Makes tests less prone to failures from trivial log message variations, focusing on the essential content. Test assertions for log messages must be diligently updated when the corresponding code or its dependencies change log output.
 
 **Pattern: Testing File I/O Across Processes (Synchronization)**
 - When a test involves a parent process checking a file created/modified by a subprocess (e.g., in `pytest` using `tmp_path`):
@@ -204,6 +302,43 @@ This document contains curated, summarized, and actionable insights derived from
     3.  Dynamically generate test-specific pipeline configuration files (e.g., `pipeline.yaml`) within the fixture. These configs should point to the temporary data paths and the dummy step scripts. Use `Path(path_str).as_posix()` for platform-independent paths in generated files.
     4.  The orchestrator tests then invoke the orchestrator script, targeting these temporary configurations and dummy steps.
 - *Rationale:* Allows isolated, repeatable, and comprehensive testing of orchestrator logic (sequencing, error handling, checkpointing, reporting) without the overhead or flakiness of running real, complex steps.
+
+**Pattern: Path Normalization for CWD-Independent Tests**
+- For scripts or tests that resolve paths and might be run from different Current Working Directories (CWDs) (e.g., project root vs. a pytest temporary directory):
+    - Ensure path normalization logic is robust. For example, make paths relative to a reliably determined project root (e.g., `os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))` from within a test file in a `tests` subdir) rather than relying on `os.getcwd()`.
+- *Rationale:* Prevents `FileNotFoundError` or incorrect path resolution when tests are run from different locations or by different test runners.
+
+**Pattern: Pytest `caplog` and Shared Logging Setup**
+- If a shared logging setup function (e.g., `common_utils.setup_logging`) indiscriminately clears all handlers from the root logger, it can remove `pytest`'s `caplog` handler, preventing log capture in tests.
+- Ensure the shared logging setup function either does not remove handlers it didn't add, or only adds its handlers if a similar handler (e.g., to `sys.stdout`) is not already present.
+- *Rationale:* Allows `caplog` to function correctly alongside a centralized logging setup.
+
+**Pattern: Test Data Hygiene**
+- Ensure test input data (fixtures, sample data files) accurately reflects current data schemas (e.g., Pydantic models).
+- If a field becomes mandatory in a schema (e.g., `schema_version`), update all relevant test data to include this field.
+- *Rationale:* Prevents misleading validation errors in the code under test that are actually due to stale or incorrect test data, which can obscure real issues or lead to incorrect test failures.
+
+**Pattern: Mocking Complex Interactions (e.g., LLM Prompts)**
+- When mocking external service calls where the input to the service is formatted or templated by the code under test (e.g., LLM prompts):
+    - Ensure the mock's conditions (e.g., in a `side_effect` function) match the *final formatted input* that the service would actually receive.
+    - Logging this final formatted input from the code under test (during development/debugging) is key to setting up the mock conditions correctly.
+- *Rationale:* Ensures mocks accurately simulate the external service for the specific inputs generated by the code, leading to more reliable tests.
+
+**Pattern: Test Maintenance with Code Evolution**
+- When a script's core logic, data structures, or output schema changes, its corresponding tests are likely to break.
+- These tests must be diligently updated to reflect the new behavior. This includes not just assertion values but also the structure of mocked data, mocked interactions, and the fields being asserted.
+- *Rationale:* Keeps the test suite relevant and reliable as the codebase evolves.
+
+**Pattern: Test Adaptation for Filtering Logic**
+- When a data processing script is modified to filter its output (e.g., keeping only certain records based on a criterion), the corresponding tests must be adapted:
+    1.  **Update Expected Output Data:** The test's definition of expected output records must be changed to include only those items that should pass the new filtering logic.
+    2.  **Adjust Record Count Assertions:** Assertions checking the total number of output records must be updated to reflect the count after filtering.
+    3.  **Verify Filtering Criteria:** Add assertions to verify that the filtering criteria were correctly applied. This might involve checking specific properties of the selected items or ensuring that items not meeting the criteria are absent.
+- *Rationale:* Ensures tests accurately validate the script's behavior after the introduction of filtering, preventing false positives or negatives.
+
+**Pattern: Test Script Reusability for Simplified Logic**
+- Test scripts designed for single-item processing, even within a "session-aware" context (e.g., testing the processing of one item that happens to be the only one in its session), can often be largely reused if the core "session-aware" logic is removed from the main script due to changed preconditions. If the fundamental single-item processing behavior remains similar, tests might only need minor adjustments (like comment updates or mock simplifications) rather than complete rewrites.
+- *Rationale:* Maximizes the value of existing test assets and reduces the effort needed to adapt tests to refactored code, provided the core processing logic for individual items is stable.
 
 ## Git Workflow
 
